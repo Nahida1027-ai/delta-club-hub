@@ -27,6 +27,7 @@ import {
   ShieldCheck,
   Sparkles,
   Target,
+  Trash2,
   Users,
   WalletCards,
   Zap,
@@ -44,6 +45,17 @@ import {
   YAxis,
 } from "recharts";
 import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogMedia,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -93,6 +105,8 @@ const glassCard =
   "rounded-[22px] border border-white/[0.08] bg-[#1c1c1e]/75 shadow-[0_18px_50px_rgba(0,0,0,0.22)] backdrop-blur-md";
 const inputClass =
   "h-11 rounded-xl border-white/10 bg-white/[0.055] text-[15px] text-white shadow-none placeholder:text-white/30 focus-visible:border-[#007AFF]/60 focus-visible:ring-[#007AFF]/20";
+const dangerButtonClass =
+  "border-[#FF3B30]/25 bg-[#FF3B30]/10 text-[#FF6961] hover:bg-[#FF3B30]/20 hover:text-white";
 const chartColors = ["#0A84FF", "#64D2FF", "#5E5CE6", "#30D158", "#FFD60A", "#FF9F0A"];
 const tiers: WorkerTier[] = ["1档", "2档", "3档"];
 
@@ -193,6 +207,19 @@ function SectionTitle({
       </div>
       {action}
     </div>
+  );
+}
+
+function SpringDialogPanel({ children }: { children: React.ReactNode }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.94, y: 12 }}
+      animate={{ opacity: 1, scale: 1, y: 0 }}
+      transition={{ type: "spring", stiffness: 300, damping: 26 }}
+      className="grid gap-4 p-6"
+    >
+      {children}
+    </motion.div>
   );
 }
 
@@ -680,6 +707,39 @@ function AssignmentDialog({
 
 function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }) {
   const [finishing, setFinishing] = useState<Order | null>(null);
+  const [editing, setEditing] = useState<Worker | null>(null);
+  const [deleting, setDeleting] = useState<Worker | null>(null);
+  const [reassigning, setReassigning] = useState<{ order: Order; worker: Worker } | null>(null);
+  const deleteWorker = useClubStore((state) => state.deleteWorker);
+  const cancelAndReassign = useClubStore((state) => state.cancelAndReassign);
+  const isMutating = useClubStore((state) => state.is_mutating);
+
+  async function confirmDeleteWorker() {
+    if (!deleting) return;
+    try {
+      const name = deleting.name;
+      await deleteWorker(deleting.id);
+      toast.success(`${name} 及其关联订单已删除`);
+      setDeleting(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除失败");
+    }
+  }
+
+  async function confirmReassignment() {
+    if (!reassigning) return;
+    try {
+      const previousName = reassigning.worker.name;
+      const result = await cancelAndReassign(
+        reassigning.order.id,
+        reassigning.worker.id,
+      );
+      toast.success(`${previousName} 已释放，新订单已派给 ${result.newWorkerName}`);
+      setReassigning(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "换人失败");
+    }
+  }
 
   return (
     <div className="space-y-8">
@@ -689,79 +749,119 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
         detail="忙碌状态会锁定接单资格；双人订单从任一打手卡结束都会同时释放两人。"
       />
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {workers.map((worker, index) => {
-          const activeOrder = orders.find(
-            (order) => order.status === "active" && order.assigned_worker_ids.includes(worker.id),
-          );
-          const busy = worker.status === "busy";
-          return (
-            <motion.article
-              layout
-              key={worker.id}
-              initial={{ opacity: 0, scale: 0.96 }}
-              animate={{
-                opacity: 1,
-                scale: busy ? 1.012 : 1,
-                boxShadow: busy
-                  ? "0 22px 58px rgba(255,69,58,.12)"
-                  : "0 18px 48px rgba(0,0,0,.2)",
-              }}
-              transition={{ type: "spring", stiffness: 230, damping: 23, delay: index * 0.025 }}
-              className={`${glassCard} overflow-hidden p-5`}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-3">
-                  <div className={`grid size-12 shrink-0 place-items-center rounded-2xl text-lg font-semibold ${busy ? "bg-[#FF453A]/12 text-[#FF6961]" : "bg-[#30D158]/12 text-[#5FE778]"}`}>
-                    {worker.name.slice(0, 1)}
-                  </div>
-                  <div className="min-w-0">
-                    <h3 className="truncate text-lg font-semibold text-white">{worker.name}</h3>
-                    <div className="mt-1 flex items-center gap-2">
-                      <span className="status-dot" data-status={worker.status} />
-                      <span className={busy ? "text-sm text-[#FF6961]" : "text-sm text-[#5FE778]"}>{busy ? "忙碌" : "空闲"}</span>
+        <AnimatePresence mode="popLayout">
+          {workers.map((worker, index) => {
+            const activeOrder = orders.find(
+              (order) => order.status === "active" && order.assigned_worker_ids.includes(worker.id),
+            );
+            const busy = worker.status === "busy";
+            return (
+              <motion.article
+                layout
+                key={worker.id}
+                initial={{ opacity: 0, scale: 0.96 }}
+                animate={{
+                  opacity: 1,
+                  scale: busy ? 1.012 : 1,
+                  boxShadow: busy
+                    ? "0 22px 58px rgba(255,69,58,.12)"
+                    : "0 18px 48px rgba(0,0,0,.2)",
+                }}
+                exit={{ opacity: 0, scale: 0.94, y: 12 }}
+                transition={{ type: "spring", stiffness: 230, damping: 23, delay: index * 0.025 }}
+                className={`${glassCard} overflow-hidden p-5`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className={`grid size-12 shrink-0 place-items-center rounded-2xl text-lg font-semibold ${busy ? "bg-[#FF453A]/12 text-[#FF6961]" : "bg-[#30D158]/12 text-[#5FE778]"}`}>
+                      {worker.name.slice(0, 1)}
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="truncate text-lg font-semibold text-white">{worker.name}</h3>
+                      <div className="mt-1 flex items-center gap-2">
+                        <span className="status-dot" data-status={worker.status} />
+                        <span className={busy ? "text-sm text-[#FF6961]" : "text-sm text-[#5FE778]"}>{busy ? "忙碌" : "空闲"}</span>
+                      </div>
                     </div>
                   </div>
+                  <TierBadge tier={worker.tier} />
                 </div>
-                <TierBadge tier={worker.tier} />
-              </div>
 
-              <div className="mt-5 grid grid-cols-2 gap-2">
-                <div className="rounded-xl bg-white/[0.04] px-3 py-3">
-                  <p className="text-[12px] text-white/35">累计完成</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{worker.total_completed_orders} 单</p>
-                </div>
-                <div className="rounded-xl bg-white/[0.04] px-3 py-3">
-                  <p className="text-[12px] text-white/35">当前状态</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{busy ? "执行中" : "待命"}</p>
-                </div>
-              </div>
-
-              <AnimatePresence mode="wait">
-                {activeOrder ? (
-                  <motion.div
-                    key={activeOrder.id}
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: "auto" }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="mt-4"
+                <div className="mt-4 grid grid-cols-2 gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isMutating}
+                    onClick={() => setEditing(worker)}
+                    className="h-9 rounded-xl border-[#007AFF]/25 bg-[#007AFF]/10 text-[#64D2FF] hover:bg-[#007AFF]/20 hover:text-white"
                   >
-                    <div className="rounded-xl border border-[#FF453A]/15 bg-[#FF453A]/[0.055] p-3">
-                      <p className="truncate text-sm font-medium text-white/85">{activeOrder.pricing_snapshot.service_name}</p>
-                      <p className="mt-1 text-[12px] text-white/35">订单 #{activeOrder.id.slice(0, 8)}</p>
-                    </div>
-                    <Button onClick={() => setFinishing(activeOrder)} className="mt-3 h-11 w-full rounded-xl bg-white text-[#1C1C1E] hover:bg-white/90">
-                      <Check className="size-4" />打单结束
-                    </Button>
-                  </motion.div>
-                ) : (
-                  <motion.div key="idle" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-4 flex h-11 items-center justify-center rounded-xl border border-dashed border-white/10 text-sm text-white/28">
-                    等待新订单
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </motion.article>
-          );
-        })}
+                    <PencilLine className="size-3.5" />编辑
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isMutating}
+                    onClick={() => {
+                      if (busy) {
+                        toast.error("该打手正在接单，无法删除");
+                        return;
+                      }
+                      setDeleting(worker);
+                    }}
+                    className={`h-9 rounded-xl ${dangerButtonClass}`}
+                  >
+                    <Trash2 className="size-3.5" />删除
+                  </Button>
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-2">
+                  <div className="rounded-xl bg-white/[0.04] px-3 py-3">
+                    <p className="text-[12px] text-white/35">累计完成</p>
+                    <p className="mt-1 text-lg font-semibold text-white">{worker.total_completed_orders} 单</p>
+                  </div>
+                  <div className="rounded-xl bg-white/[0.04] px-3 py-3">
+                    <p className="text-[12px] text-white/35">当前状态</p>
+                    <p className="mt-1 text-lg font-semibold text-white">{busy ? "执行中" : "待命"}</p>
+                  </div>
+                </div>
+
+                <AnimatePresence mode="wait">
+                  {activeOrder ? (
+                    <motion.div
+                      key={activeOrder.id}
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="mt-4"
+                    >
+                      <div className="rounded-xl border border-[#FF453A]/15 bg-[#FF453A]/[0.055] p-3">
+                        <p className="truncate text-sm font-medium text-white/85">{activeOrder.pricing_snapshot.service_name}</p>
+                        <p className="mt-1 text-[12px] text-white/35">订单 #{activeOrder.id.slice(0, 8)}</p>
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        <Button onClick={() => setFinishing(activeOrder)} disabled={isMutating} className="h-11 rounded-xl bg-white text-[#1C1C1E] hover:bg-white/90">
+                          <Check className="size-4" />打单结束
+                        </Button>
+                        <Button
+                          variant="outline"
+                          disabled={isMutating}
+                          onClick={() => setReassigning({ order: activeOrder, worker })}
+                          className={`h-11 rounded-xl ${dangerButtonClass}`}
+                        >
+                          <RefreshCw className="size-4" />老板换人
+                        </Button>
+                      </div>
+                    </motion.div>
+                  ) : (
+                    <motion.div key="idle" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-4 flex h-11 items-center justify-center rounded-xl border border-dashed border-white/10 text-sm text-white/28">
+                      等待新订单
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </motion.article>
+            );
+          })}
+        </AnimatePresence>
       </div>
       <FinishOrderDialog
         key={finishing?.id ?? "closed"}
@@ -770,7 +870,145 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
         open={Boolean(finishing)}
         onOpenChange={(open) => !open && setFinishing(null)}
       />
+      <EditWorkerDialog
+        key={editing?.id ?? "closed"}
+        worker={editing}
+        open={Boolean(editing)}
+        onOpenChange={(open) => !open && setEditing(null)}
+      />
+      <DangerConfirmDialog
+        open={Boolean(deleting)}
+        title="删除打手"
+        description="确定要删除该打手吗？此操作不可撤销。该打手的所有历史订单及对应收入也会同步移除。"
+        confirmLabel="确认删除"
+        icon={Trash2}
+        isMutating={isMutating}
+        onOpenChange={(open) => !open && setDeleting(null)}
+        onConfirm={confirmDeleteWorker}
+      />
+      <DangerConfirmDialog
+        open={Boolean(reassigning)}
+        title="老板申请换人"
+        description="确定取消该打手的当前订单并重新指派吗？该打手将不计业绩且无收入。若没有符合规则的空闲打手，原订单会保持不变。"
+        confirmLabel="确认换人"
+        icon={RefreshCw}
+        isMutating={isMutating}
+        onOpenChange={(open) => !open && setReassigning(null)}
+        onConfirm={confirmReassignment}
+      />
     </div>
+  );
+}
+
+function EditWorkerDialog({
+  worker,
+  open,
+  onOpenChange,
+}: {
+  worker: Worker | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const updateWorker = useClubStore((state) => state.updateWorker);
+  const isMutating = useClubStore((state) => state.is_mutating);
+  const [name, setName] = useState(worker?.name ?? "");
+  const [tier, setTier] = useState<WorkerTier>(worker?.tier ?? "1档");
+
+  if (!worker) return null;
+  const busy = worker.status === "busy";
+
+  async function save() {
+    if (!name.trim()) return;
+    try {
+      await updateWorker(worker!.id, { name, tier });
+      toast.success("打手信息已更新");
+      onOpenChange(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败");
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="overflow-hidden border-white/10 bg-[#171719]/95 p-0 text-white shadow-2xl backdrop-blur-xl sm:max-w-md">
+        <SpringDialogPanel>
+          <DialogHeader>
+            <DialogTitle className="text-xl">编辑打手信息</DialogTitle>
+            <DialogDescription className="text-white/45">姓名会立即同步到看板、接单列表与排行榜。</DialogDescription>
+          </DialogHeader>
+          <label className="space-y-2">
+            <span className="text-sm font-medium text-white/65">打手姓名</span>
+            <Input value={name} maxLength={32} onChange={(event) => setName(event.target.value)} className={inputClass} autoFocus />
+          </label>
+          <label className="space-y-2">
+            <span className="flex items-center justify-between text-sm font-medium text-white/65">
+              <span>档位</span>
+              {busy ? <span className="text-[#FF6961]">接单中已锁定</span> : null}
+            </span>
+            <Select value={tier} disabled={busy} onValueChange={(value) => setTier(value as WorkerTier)}>
+              <SelectTrigger className={`${inputClass} w-full disabled:cursor-not-allowed disabled:opacity-45`}><SelectValue /></SelectTrigger>
+              <SelectContent className="border-white/10 bg-[#242426] text-white">
+                {tiers.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            {busy ? <p className="text-[13px] leading-5 text-white/40">该打手正在执行订单，本次只能修改姓名。</p> : null}
+          </label>
+          <DialogFooter>
+            <Button variant="ghost" className="h-11 rounded-xl text-white/60 hover:bg-white/[0.06] hover:text-white" onClick={() => onOpenChange(false)}>取消</Button>
+            <Button className="h-11 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]" disabled={!name.trim() || isMutating} onClick={save}>{isMutating ? "正在保存…" : "保存修改"}</Button>
+          </DialogFooter>
+        </SpringDialogPanel>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DangerConfirmDialog({
+  open,
+  title,
+  description,
+  confirmLabel,
+  icon: Icon,
+  isMutating,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  icon: React.ComponentType<{ className?: string }>;
+  isMutating: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => Promise<void>;
+}) {
+  return (
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent className="overflow-hidden border-white/10 bg-[#171719]/95 p-0 text-white shadow-2xl backdrop-blur-xl">
+        <SpringDialogPanel>
+          <AlertDialogHeader>
+            <AlertDialogMedia className="mb-2 size-12 rounded-2xl bg-[#FF3B30]/12 text-[#FF6961]">
+              <Icon className="size-5" />
+            </AlertDialogMedia>
+            <AlertDialogTitle className="text-xl">{title}</AlertDialogTitle>
+            <AlertDialogDescription className="leading-6 text-white/45">{description}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isMutating} className="h-11 rounded-xl border-white/10 bg-white/[0.045] text-white/65 hover:bg-white/10 hover:text-white">取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={isMutating}
+              onClick={(event) => {
+                event.preventDefault();
+                void onConfirm();
+              }}
+              className="h-11 rounded-xl bg-[#FF3B30] text-white hover:bg-[#ff5047]"
+            >
+              {isMutating ? "正在处理…" : confirmLabel}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </SpringDialogPanel>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -1051,6 +1289,9 @@ function HistoryPanel({
   selectedMonth: string;
   onMonthChange: (value: string) => void;
 }) {
+  const deleteHistoricalOrder = useClubStore((state) => state.deleteHistoricalOrder);
+  const isMutating = useClubStore((state) => state.is_mutating);
+  const [deletingOrder, setDeletingOrder] = useState<Order | null>(null);
   const completed = orders.filter(
     (order) => order.status === "completed" && inMonth(order.completed_at, selectedMonth),
   );
@@ -1060,6 +1301,17 @@ function HistoryPanel({
     0,
   );
   const tips = completed.reduce((sum, order) => sum + order.tip, 0);
+
+  async function confirmDeleteOrder() {
+    if (!deletingOrder) return;
+    try {
+      await deleteHistoricalOrder(deletingOrder.id);
+      toast.success("历史订单已删除，相关收入与业绩已同步回退");
+      setDeletingOrder(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除失败");
+    }
+  }
 
   return (
     <div className="space-y-8">
@@ -1083,19 +1335,41 @@ function HistoryPanel({
                 <TableHead className="text-white/40">服务与规则</TableHead>
                 <TableHead className="text-white/40">打手实得</TableHead>
                 <TableHead className="text-right text-white/40">打赏</TableHead>
-                <TableHead className="pr-5 text-right text-white/40 sm:pr-6">俱乐部入账</TableHead>
+                <TableHead className="text-right text-white/40">俱乐部入账</TableHead>
+                <TableHead className="pr-5 text-right text-white/40 sm:pr-6">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {completed.map((order) => (
-                <TableRow key={order.id} className="border-white/[0.06] hover:bg-white/[0.025]">
-                  <TableCell className="px-5 py-4 sm:px-6"><p className="font-mono text-[13px] text-white/65">#{order.id.slice(0, 8)}</p><p className="mt-1 text-[12px] text-white/32">{formatDateTime(order.completed_at)}</p></TableCell>
-                  <TableCell><p className="font-medium text-white">{order.pricing_snapshot.service_name}</p><p className="mt-1 text-[12px] text-white/35">{formatMoney(order.pricing_snapshot.base_price)} · 抽成 {order.pricing_snapshot.club_commission_rate}% · {splitLabel(order.pricing_snapshot.split_type)}</p></TableCell>
-                  <TableCell><div className="space-y-1">{order.final_worker_incomes.map((income) => <p key={income.workerId} className="text-sm text-white/65">{workerName(workers, income.workerId, order)} <span className="font-medium text-white">{formatMoney(income.amount)}</span></p>)}</div></TableCell>
-                  <TableCell className="text-right text-white/65">{formatMoney(order.tip)}</TableCell>
-                  <TableCell className="pr-5 text-right font-semibold text-[#64D2FF] sm:pr-6">{formatMoney(order.final_club_income ?? 0)}</TableCell>
-                </TableRow>
-              ))}
+              <AnimatePresence initial={false} mode="popLayout">
+                {completed.map((order) => (
+                  <motion.tr
+                    layout
+                    key={order.id}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 72, scale: 0.98 }}
+                    transition={{ duration: 0.24, ease: "easeOut" }}
+                    className="border-b border-white/[0.06] transition-colors hover:bg-white/[0.025]"
+                  >
+                    <TableCell className="px-5 py-4 sm:px-6"><p className="font-mono text-[13px] text-white/65">#{order.id.slice(0, 8)}</p><p className="mt-1 text-[12px] text-white/32">{formatDateTime(order.completed_at)}</p></TableCell>
+                    <TableCell><p className="font-medium text-white">{order.pricing_snapshot.service_name}</p><p className="mt-1 text-[12px] text-white/35">{formatMoney(order.pricing_snapshot.base_price)} · 抽成 {order.pricing_snapshot.club_commission_rate}% · {splitLabel(order.pricing_snapshot.split_type)}</p></TableCell>
+                    <TableCell><div className="space-y-1">{order.final_worker_incomes.map((income) => <p key={income.workerId} className="text-sm text-white/65">{workerName(workers, income.workerId, order)} <span className="font-medium text-white">{formatMoney(income.amount)}</span></p>)}</div></TableCell>
+                    <TableCell className="text-right text-white/65">{formatMoney(order.tip)}</TableCell>
+                    <TableCell className="text-right font-semibold text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</TableCell>
+                    <TableCell className="pr-5 text-right sm:pr-6">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={isMutating}
+                        onClick={() => setDeletingOrder(order)}
+                        className={`h-9 rounded-xl ${dangerButtonClass}`}
+                      >
+                        <Trash2 className="size-3.5" />删除
+                      </Button>
+                    </TableCell>
+                  </motion.tr>
+                ))}
+              </AnimatePresence>
             </TableBody>
           </Table>
         ) : (
@@ -1105,6 +1379,16 @@ function HistoryPanel({
           </div>
         )}
       </article>
+      <DangerConfirmDialog
+        open={Boolean(deletingOrder)}
+        title="删除历史订单"
+        description="删除该订单将同步扣减打手和俱乐部的收入，确定删除吗？"
+        confirmLabel="删除订单"
+        icon={Trash2}
+        isMutating={isMutating}
+        onOpenChange={(open) => !open && setDeletingOrder(null)}
+        onConfirm={confirmDeleteOrder}
+      />
     </div>
   );
 }

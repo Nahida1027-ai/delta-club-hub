@@ -8,6 +8,7 @@ import type {
   PriceMenuItem,
   SettlementResult,
   Worker,
+  WorkerTier,
 } from "@/lib/club-types";
 import {
   buildPayoutWeights,
@@ -18,7 +19,15 @@ import {
 
 interface ApiData extends ClubData {
   created_order_id?: string;
+  new_order_id?: string;
+  new_worker_id?: string;
   settlement?: SettlementResult;
+}
+
+interface ReassignmentResult {
+  orderId: string;
+  newWorkerId: string;
+  newWorkerName: string;
 }
 
 interface ClubStore extends ClubData {
@@ -28,6 +37,10 @@ interface ClubStore extends ClubData {
   error: string | null;
   last_synced_at: string | null;
   load: () => Promise<void>;
+  updateWorker: (id: string, data: { name: string; tier: WorkerTier }) => Promise<void>;
+  deleteWorker: (id: string) => Promise<void>;
+  deleteHistoricalOrder: (orderId: string) => Promise<void>;
+  cancelAndReassign: (orderId: string, oldWorkerId: string) => Promise<ReassignmentResult>;
   updateMenuItem: (item: PriceMenuItem) => Promise<void>;
   createOrder: (menuItemId: string, workerIds: string[]) => Promise<string>;
   finishOrder: (orderId: string, tip: number) => Promise<SettlementResult>;
@@ -49,6 +62,48 @@ function getSelectedWorkers(workers: Worker[], workerIds: string[]) {
   const selected = workerIds.map((id) => byId.get(id)).filter(Boolean) as Worker[];
   if (selected.length !== workerIds.length) throw new Error("所选打手不存在");
   return selected;
+}
+
+function findReplacementWorker(
+  data: ClubData,
+  order: Order,
+  oldWorkerId: string,
+) {
+  const oldWeight = order.pricing_snapshot.payout_weights.find(
+    (entry) => entry.workerId === oldWorkerId,
+  );
+  if (!oldWeight) throw new Error("该打手不属于当前订单");
+
+  const menuItem = data.menu.find((item) => item.id === order.menu_item_id);
+  const eligibleTiers = order.pricing_snapshot.split_type === "tiered"
+    ? [oldWeight.tier]
+    : menuItem?.eligible_tiers ?? [oldWeight.tier];
+
+  return data.workers.find(
+    (worker) =>
+      worker.status === "idle" &&
+      !order.assigned_worker_ids.includes(worker.id) &&
+      eligibleTiers.includes(worker.tier),
+  );
+}
+
+function decrementCompletionCounts(workers: Worker[], removedOrders: Order[]) {
+  const decrements = new Map<string, number>();
+  removedOrders
+    .filter((order) => order.status === "completed")
+    .forEach((order) => {
+      new Set(order.final_worker_incomes.map((income) => income.workerId)).forEach((workerId) => {
+        decrements.set(workerId, (decrements.get(workerId) ?? 0) + 1);
+      });
+    });
+
+  return workers.map((worker) => ({
+    ...worker,
+    total_completed_orders: Math.max(
+      0,
+      worker.total_completed_orders - (decrements.get(worker.id) ?? 0),
+    ),
+  }));
 }
 
 export const useClubStore = create<ClubStore>((set, get) => ({
@@ -80,6 +135,161 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         is_ready: true,
         error: error instanceof Error ? error.message : "数据加载失败",
       });
+    }
+  },
+
+  updateWorker: async (id, data) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const worker = state.workers.find((candidate) => candidate.id === id);
+    if (!worker) throw new Error("未找到该打手");
+    const name = data.name.trim();
+    if (!name) throw new Error("请输入打手姓名");
+    if (worker.status === "busy" && data.tier !== worker.tier) {
+      throw new Error("该打手正在接单，只能修改姓名");
+    }
+
+    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    set({
+      workers: state.workers.map((candidate) =>
+        candidate.id === id ? { ...candidate, name, tier: data.tier } : candidate,
+      ),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({
+        action: "update_worker",
+        worker_id: id,
+        data: { name, tier: data.tier },
+      });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  deleteWorker: async (id) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const worker = state.workers.find((candidate) => candidate.id === id);
+    if (!worker) throw new Error("未找到该打手");
+    if (worker.status === "busy") throw new Error("该打手正在接单，无法删除");
+
+    const removedOrders = state.orders.filter((order) =>
+      order.assigned_worker_ids.includes(id),
+    );
+    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    set({
+      workers: decrementCompletionCounts(
+        state.workers.filter((candidate) => candidate.id !== id),
+        removedOrders,
+      ),
+      orders: state.orders.filter((order) => !order.assigned_worker_ids.includes(id)),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "delete_worker", worker_id: id });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  deleteHistoricalOrder: async (orderId) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const order = state.orders.find((candidate) => candidate.id === orderId);
+    if (!order || order.status !== "completed") {
+      throw new Error("只允许删除已完成的历史订单");
+    }
+
+    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    set({
+      workers: decrementCompletionCounts(state.workers, [order]),
+      orders: state.orders.filter((candidate) => candidate.id !== orderId),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "delete_historical_order", order_id: orderId });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  cancelAndReassign: async (orderId, oldWorkerId) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const order = state.orders.find((candidate) => candidate.id === orderId);
+    if (!order || order.status !== "active") throw new Error("订单已结束或不存在");
+    const oldWorker = state.workers.find((worker) => worker.id === oldWorkerId);
+    if (!oldWorker || oldWorker.status !== "busy") throw new Error("原打手当前不在接单");
+    if (!order.assigned_worker_ids.includes(oldWorkerId)) {
+      throw new Error("该打手不属于当前订单");
+    }
+
+    const replacement = findReplacementWorker(state, order, oldWorkerId);
+    if (!replacement) throw new Error("当前无空闲打手可替换，请稍后再试");
+
+    const optimisticId = `reassigned-${Date.now()}`;
+    const assignedWorkerIds = order.assigned_worker_ids.map((workerId) =>
+      workerId === oldWorkerId ? replacement.id : workerId,
+    );
+    const optimisticOrder: Order = {
+      ...order,
+      id: optimisticId,
+      assigned_worker_ids: assignedWorkerIds,
+      created_at: new Date().toISOString(),
+      pricing_snapshot: {
+        ...order.pricing_snapshot,
+        payout_weights: order.pricing_snapshot.payout_weights.map((entry) =>
+          entry.workerId === oldWorkerId
+            ? {
+                ...entry,
+                workerId: replacement.id,
+                workerName: replacement.name,
+                tier: replacement.tier,
+              }
+            : entry,
+        ),
+      },
+    };
+    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    set({
+      workers: state.workers.map((worker) => {
+        if (worker.id === oldWorkerId) return { ...worker, status: "idle" };
+        if (worker.id === replacement.id) return { ...worker, status: "busy" };
+        return worker;
+      }),
+      orders: [optimisticOrder, ...state.orders.filter((candidate) => candidate.id !== orderId)],
+      is_mutating: true,
+      error: null,
+    });
+
+    try {
+      const result = await apiRequest({
+        action: "cancel_and_reassign",
+        order_id: orderId,
+        old_worker_id: oldWorkerId,
+      });
+      const newWorkerId = result.new_worker_id ?? replacement.id;
+      const newWorkerName =
+        result.workers.find((worker) => worker.id === newWorkerId)?.name ?? replacement.name;
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+      return {
+        orderId: result.new_order_id ?? optimisticId,
+        newWorkerId,
+        newWorkerName,
+      };
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
     }
   },
 
@@ -252,4 +462,3 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 }));
-

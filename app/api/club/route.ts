@@ -87,6 +87,11 @@ function seedSnapshot(
 
 async function ensureSeeded() {
   const db = getD1();
+  const existingMenu = await db
+    .prepare("SELECT COUNT(*) AS count FROM price_menu")
+    .first<{ count: number }>();
+  if ((existingMenu?.count ?? 0) > 0) return;
+
   const now = new Date().toISOString();
   const allTiers = JSON.stringify(["1档", "2档", "3档"]);
   const tieredTiers = JSON.stringify(["1档", "2档"]);
@@ -187,6 +192,185 @@ export async function POST(request: Request) {
     const payload = (await request.json()) as Record<string, unknown>;
     const action = payload.action;
     const db = getD1();
+
+    if (action === "update_worker") {
+      const workerId = String(payload.worker_id ?? "");
+      const data = (payload.data ?? {}) as Record<string, unknown>;
+      const name = String(data.name ?? "").trim();
+      const tier = String(data.tier ?? "") as WorkerTier;
+      if (!name) throw new Error("请输入打手姓名");
+      if (!["1档", "2档", "3档"].includes(tier)) throw new Error("请选择有效档位");
+
+      const existing = await db
+        .prepare("SELECT id, name, tier, status, total_completed_orders FROM workers WHERE id = ?")
+        .bind(workerId)
+        .first<WorkerRow>();
+      if (!existing) throw new Error("未找到该打手");
+      if (existing.status === "busy" && tier !== existing.tier) {
+        return Response.json({ error: "该打手正在接单，只能修改姓名" }, { status: 409 });
+      }
+
+      const result = await db
+        .prepare("UPDATE workers SET name = ?, tier = ? WHERE id = ? AND (status = 'idle' OR tier = ?)")
+        .bind(name, tier, workerId, tier)
+        .run();
+      if (!result.meta.changes) {
+        return Response.json({ error: "打手状态刚刚发生变化，请重试" }, { status: 409 });
+      }
+      return Response.json(await readClubData());
+    }
+
+    if (action === "delete_historical_order") {
+      const orderId = String(payload.order_id ?? "");
+      const row = await db
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .bind(orderId)
+        .first<OrderRow>();
+      if (!row || row.status !== "completed") {
+        return Response.json({ error: "只允许删除已完成的历史订单" }, { status: 409 });
+      }
+
+      const [deleteResult] = await db.batch([
+        db.prepare("DELETE FROM orders WHERE id = ? AND status = 'completed'").bind(orderId),
+        db.prepare("UPDATE workers SET total_completed_orders = (SELECT COUNT(*) FROM orders AS completed_order WHERE completed_order.status = 'completed' AND EXISTS (SELECT 1 FROM json_each(completed_order.assigned_worker_ids_json) AS assigned WHERE assigned.value = workers.id))"),
+      ]);
+      if (!deleteResult.meta.changes) {
+        return Response.json({ error: "订单状态刚刚发生变化，未执行删除" }, { status: 409 });
+      }
+      return Response.json(await readClubData());
+    }
+
+    if (action === "delete_worker") {
+      const workerId = String(payload.worker_id ?? "");
+      const worker = await db
+        .prepare("SELECT id, name, tier, status, total_completed_orders FROM workers WHERE id = ?")
+        .bind(workerId)
+        .first<WorkerRow>();
+      if (!worker) throw new Error("未找到该打手");
+      if (worker.status === "busy") {
+        return Response.json({ error: "该打手正在接单，无法删除" }, { status: 409 });
+      }
+
+      const orderResult = await db
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at FROM orders")
+        .all<OrderRow>();
+      const relatedOrders = orderResult.results.filter((order) =>
+        (JSON.parse(order.assigned_worker_ids_json) as string[]).includes(workerId),
+      );
+      if (relatedOrders.some((order) => order.status === "active")) {
+        return Response.json({ error: "该打手正在接单，无法删除" }, { status: 409 });
+      }
+
+      const statements = [];
+      if (relatedOrders.length) {
+        const placeholders = relatedOrders.map(() => "?").join(", ");
+        statements.push(
+          db
+            .prepare(`DELETE FROM orders WHERE id IN (${placeholders}) AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')`)
+            .bind(...relatedOrders.map((order) => order.id), workerId),
+        );
+      }
+      statements.push(
+        db.prepare("UPDATE workers SET total_completed_orders = (SELECT COUNT(*) FROM orders AS completed_order WHERE completed_order.status = 'completed' AND EXISTS (SELECT 1 FROM json_each(completed_order.assigned_worker_ids_json) AS assigned WHERE assigned.value = workers.id)) WHERE EXISTS (SELECT 1 FROM workers AS target WHERE target.id = ? AND target.status = 'idle')").bind(workerId),
+      );
+      statements.push(
+        db.prepare("DELETE FROM workers WHERE id = ? AND status = 'idle'").bind(workerId),
+      );
+      const results = await db.batch(statements);
+      if (!results.at(-1)?.meta.changes) {
+        return Response.json({ error: "该打手正在接单，无法删除" }, { status: 409 });
+      }
+      return Response.json(await readClubData());
+    }
+
+    if (action === "cancel_and_reassign") {
+      const orderId = String(payload.order_id ?? "");
+      const oldWorkerId = String(payload.old_worker_id ?? "");
+      const row = await db
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .bind(orderId)
+        .first<OrderRow>();
+      if (!row || row.status !== "active") {
+        return Response.json({ error: "订单已结束或不存在" }, { status: 409 });
+      }
+
+      const assignedWorkerIds = JSON.parse(row.assigned_worker_ids_json) as string[];
+      if (!assignedWorkerIds.includes(oldWorkerId)) throw new Error("该打手不属于当前订单");
+      const snapshot = JSON.parse(row.pricing_snapshot_json) as OrderPricingSnapshot;
+      const oldWeight = snapshot.payout_weights.find(
+        (entry) => entry.workerId === oldWorkerId,
+      );
+      if (!oldWeight) throw new Error("订单缺少该打手的分配权重");
+
+      const [menuRow, workerResult] = await Promise.all([
+        db
+          .prepare("SELECT id, service_name, base_price_cents, club_commission_bps, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu WHERE id = ?")
+          .bind(row.menu_item_id)
+          .first<MenuRow>(),
+        db
+          .prepare("SELECT id, name, tier, status, total_completed_orders FROM workers ORDER BY tier, name")
+          .all<WorkerRow>(),
+      ]);
+      if (!menuRow) throw new Error("服务项目不存在");
+      const oldWorker = workerResult.results.find((worker) => worker.id === oldWorkerId);
+      if (!oldWorker || oldWorker.status !== "busy") {
+        return Response.json({ error: "原打手当前不在接单" }, { status: 409 });
+      }
+
+      const eligibleTiers = snapshot.split_type === "tiered"
+        ? [oldWeight.tier]
+        : (JSON.parse(menuRow.eligible_tiers_json) as WorkerTier[]);
+      const replacement = workerResult.results.find(
+        (worker) =>
+          worker.status === "idle" &&
+          !assignedWorkerIds.includes(worker.id) &&
+          eligibleTiers.includes(worker.tier),
+      );
+      if (!replacement) {
+        return Response.json(
+          { error: "当前无空闲打手可替换，请稍后再试" },
+          { status: 409 },
+        );
+      }
+
+      const newOrderId = crypto.randomUUID();
+      const newAssignedWorkerIds = assignedWorkerIds.map((workerId) =>
+        workerId === oldWorkerId ? replacement.id : workerId,
+      );
+      const newSnapshot: OrderPricingSnapshot = {
+        ...snapshot,
+        payout_weights: snapshot.payout_weights.map((entry) =>
+          entry.workerId === oldWorkerId
+            ? {
+                ...entry,
+                workerId: replacement.id,
+                workerName: replacement.name,
+                tier: replacement.tier,
+              }
+            : entry,
+        ),
+      };
+      const createdAt = new Date().toISOString();
+      const [insertResult, , , deleteResult] = await db.batch([
+        db
+          .prepare("INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_worker_incomes_json, pricing_snapshot_json, created_at) SELECT ?, ?, ?, 'active', 0, '[]', ?, ? WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
+          .bind(newOrderId, row.menu_item_id, JSON.stringify(newAssignedWorkerIds), JSON.stringify(newSnapshot), createdAt, orderId, oldWorkerId, replacement.id),
+        db.prepare("UPDATE workers SET status = 'busy' WHERE id = ? AND status = 'idle' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(replacement.id, newOrderId),
+        db.prepare("UPDATE workers SET status = 'idle' WHERE id = ? AND status = 'busy' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(oldWorkerId, newOrderId),
+        db.prepare("DELETE FROM orders WHERE id = ? AND status = 'active' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(orderId, newOrderId),
+      ]);
+      if (!insertResult.meta.changes || !deleteResult.meta.changes) {
+        return Response.json(
+          { error: "打手状态刚刚发生变化，请重新操作" },
+          { status: 409 },
+        );
+      }
+      return Response.json({
+        ...(await readClubData()),
+        new_order_id: newOrderId,
+        new_worker_id: replacement.id,
+      });
+    }
 
     if (action === "update_menu") {
       const item = payload.item as PriceMenuItem;
@@ -297,4 +481,3 @@ export async function POST(request: Request) {
     return jsonError(error);
   }
 }
-
