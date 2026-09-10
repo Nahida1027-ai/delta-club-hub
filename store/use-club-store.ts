@@ -19,6 +19,8 @@ import {
 
 interface ApiData extends ClubData {
   created_order_id?: string;
+  created_worker?: Worker;
+  created_menu_item?: PriceMenuItem;
   new_order_id?: string;
   new_worker_id?: string;
   settlement?: SettlementResult;
@@ -37,6 +39,8 @@ interface ClubStore extends ClubData {
   error: string | null;
   last_synced_at: string | null;
   load: () => Promise<void>;
+  addWorker: (data: { name: string; tier: WorkerTier }) => Promise<Worker>;
+  addMenuItem: (data: Omit<PriceMenuItem, "id">) => Promise<PriceMenuItem>;
   updateWorker: (id: string, data: { name: string; tier: WorkerTier }) => Promise<void>;
   deleteWorker: (id: string) => Promise<void>;
   deleteHistoricalOrder: (orderId: string) => Promise<void>;
@@ -135,6 +139,121 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         is_ready: true,
         error: error instanceof Error ? error.message : "数据加载失败",
       });
+    }
+  },
+
+  addWorker: async (data) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const name = data.name.trim();
+    if (!name) throw new Error("请输入打手姓名");
+    if (Array.from(name).length > 20) throw new Error("打手姓名最多 20 个字符");
+    if (!["1档", "2档", "3档"].includes(data.tier)) {
+      throw new Error("请选择有效档位");
+    }
+    if (
+      state.workers.some(
+        (worker) => worker.name.trim().toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"),
+      )
+    ) {
+      throw new Error("已存在同名打手，请使用其他姓名");
+    }
+
+    const worker: Worker = {
+      id: crypto.randomUUID(),
+      name,
+      tier: data.tier,
+      status: "idle",
+      total_completed_orders: 0,
+    };
+    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    set({
+      workers: [...state.workers, worker],
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "add_worker", worker });
+      const createdWorker =
+        result.created_worker ??
+        result.workers.find((candidate) => candidate.id === worker.id) ??
+        worker;
+      set({
+        ...result,
+        workers: [
+          ...result.workers.filter((candidate) => candidate.id !== createdWorker.id),
+          createdWorker,
+        ],
+        is_mutating: false,
+        last_synced_at: new Date().toISOString(),
+      });
+      return createdWorker;
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  addMenuItem: async (data) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const item: PriceMenuItem = {
+      ...data,
+      id: crypto.randomUUID(),
+      service_name: data.service_name.trim(),
+      tiered_ratios:
+        data.split_type === "tiered" && data.tiered_ratios
+          ? { ...data.tiered_ratios }
+          : null,
+      eligible_tiers:
+        data.split_type === "tiered"
+          ? ["1档", "2档"]
+          : [...data.eligible_tiers],
+    };
+    if (toCents(item.base_price) <= 0) throw new Error("基础价格必须大于 0");
+    if (
+      item.split_type === "tiered" &&
+      (!Number.isFinite(item.tiered_ratios?.["1档"]) ||
+        !Number.isFinite(item.tiered_ratios?.["2档"]))
+    ) {
+      throw new Error("请填写有效的档位占比");
+    }
+    validateMenuRule(item);
+    if (
+      state.menu.some(
+        (current) =>
+          current.service_name.trim().toLocaleLowerCase("zh-CN") ===
+          item.service_name.toLocaleLowerCase("zh-CN"),
+      )
+    ) {
+      throw new Error("已存在同名服务，请使用其他名称");
+    }
+
+    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    set({
+      menu: [...state.menu, item],
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "add_menu_item", item });
+      const createdMenuItem =
+        result.created_menu_item ??
+        result.menu.find((candidate) => candidate.id === item.id) ??
+        item;
+      set({
+        ...result,
+        menu: [
+          ...result.menu.filter((candidate) => candidate.id !== createdMenuItem.id),
+          createdMenuItem,
+        ],
+        is_mutating: false,
+        last_synced_at: new Date().toISOString(),
+      });
+      return createdMenuItem;
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
     }
   },
 

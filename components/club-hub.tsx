@@ -22,6 +22,7 @@ import {
   LockKeyhole,
   PencilLine,
   Play,
+  Plus,
   RefreshCw,
   Settings2,
   ShieldCheck,
@@ -45,6 +46,8 @@ import {
   YAxis,
 } from "recharts";
 import { toast } from "sonner";
+import { AddServiceModal } from "@/components/Modals/AddServiceModal";
+import { AddWorkerModal } from "@/components/Modals/AddWorkerModal";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -706,6 +709,7 @@ function AssignmentDialog({
 }
 
 function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }) {
+  const [adding, setAdding] = useState(false);
   const [finishing, setFinishing] = useState<Order | null>(null);
   const [editing, setEditing] = useState<Worker | null>(null);
   const [deleting, setDeleting] = useState<Worker | null>(null);
@@ -747,6 +751,16 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
         eyebrow="WORKER FLOOR"
         title="打手状态看板"
         detail="忙碌状态会锁定接单资格；双人订单从任一打手卡结束都会同时释放两人。"
+        action={(
+          <Button
+            variant="outline"
+            disabled={isMutating}
+            onClick={() => setAdding(true)}
+            className="h-11 rounded-2xl border-[#007AFF]/30 bg-[#007AFF]/12 px-4 text-[#64D2FF] shadow-[0_10px_30px_rgba(0,122,255,.12)] backdrop-blur-xl hover:bg-[#007AFF]/22 hover:text-white"
+          >
+            <Plus className="size-4" />添加打手
+          </Button>
+        )}
       />
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <AnimatePresence mode="popLayout">
@@ -759,9 +773,10 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
               <motion.article
                 layout
                 key={worker.id}
-                initial={{ opacity: 0, scale: 0.96 }}
+                initial={{ opacity: 0, scale: 0.96, y: 20 }}
                 animate={{
                   opacity: 1,
+                  y: 0,
                   scale: busy ? 1.012 : 1,
                   boxShadow: busy
                     ? "0 22px 58px rgba(255,69,58,.12)"
@@ -863,6 +878,11 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
           })}
         </AnimatePresence>
       </div>
+      <AddWorkerModal
+        key={adding ? "open" : "closed"}
+        open={adding}
+        onOpenChange={setAdding}
+      />
       <FinishOrderDialog
         key={finishing?.id ?? "closed"}
         order={finishing}
@@ -1095,10 +1115,26 @@ function FinishOrderDialog({
 }
 
 function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
+  const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<PriceMenuItem | null>(null);
+  const isMutating = useClubStore((state) => state.is_mutating);
   return (
     <div className="space-y-8">
-      <SectionTitle eyebrow="RULE ENGINE" title="价格表管理" detail="每项服务独立设置抽成与分配方式；修改只作用于后续新订单。" />
+      <SectionTitle
+        eyebrow="RULE ENGINE"
+        title="价格表管理"
+        detail="每项服务独立设置抽成与分配方式；修改只作用于后续新订单。"
+        action={(
+          <Button
+            variant="outline"
+            disabled={isMutating}
+            onClick={() => setAdding(true)}
+            className="h-11 rounded-2xl border-[#007AFF]/30 bg-[#007AFF]/12 px-4 text-[#64D2FF] shadow-[0_10px_30px_rgba(0,122,255,.12)] backdrop-blur-xl hover:bg-[#007AFF]/22 hover:text-white"
+          >
+            <Plus className="size-4" />添加服务
+          </Button>
+        )}
+      />
       <article className={`${glassCard} overflow-hidden`}>
         <Table>
           <TableHeader>
@@ -1112,8 +1148,17 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {menu.map((item) => (
-              <TableRow key={item.id} className="border-white/[0.06] hover:bg-white/[0.025]">
+            <AnimatePresence initial={false} mode="popLayout">
+              {menu.map((item) => (
+              <motion.tr
+                layout
+                key={item.id}
+                initial={{ opacity: 0, x: 56 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 56 }}
+                transition={{ type: "spring", stiffness: 260, damping: 26 }}
+                className="border-b border-white/[0.06] transition-colors hover:bg-white/[0.025]"
+              >
                 <TableCell className="px-5 py-5 font-medium text-white sm:px-6">{item.service_name}</TableCell>
                 <TableCell className="font-semibold text-white">{formatMoney(item.base_price)}</TableCell>
                 <TableCell><span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 font-medium text-[#64D2FF]">{item.club_commission_rate}%</span></TableCell>
@@ -1125,10 +1170,11 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
                 </TableCell>
                 <TableCell><div className="flex gap-1">{item.eligible_tiers.map((tier) => <TierBadge key={tier} tier={tier} />)}</div></TableCell>
                 <TableCell className="pr-5 text-right sm:pr-6">
-                  <Button variant="outline" size="sm" onClick={() => setEditing(item)} className="rounded-lg border-white/10 bg-white/[0.045] text-white/70 hover:bg-white/10 hover:text-white"><PencilLine className="size-3.5" />编辑规则</Button>
+                  <Button variant="outline" size="sm" disabled={isMutating} onClick={() => setEditing(item)} className="rounded-lg border-white/10 bg-white/[0.045] text-white/70 hover:bg-white/10 hover:text-white"><PencilLine className="size-3.5" />编辑规则</Button>
                 </TableCell>
-              </TableRow>
-            ))}
+              </motion.tr>
+              ))}
+            </AnimatePresence>
           </TableBody>
         </Table>
       </article>
@@ -1137,6 +1183,11 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
         <RuleNote icon={Coins} title="打赏免抽成" text="俱乐部只按基础单价抽成，打赏金额完整进入打手分配池。" />
         <RuleNote icon={ShieldCheck} title="金额守恒" text="按整数分结算并自动处理尾差，所有收入相加始终等于订单总额。" />
       </div>
+      <AddServiceModal
+        key={adding ? "open" : "closed"}
+        open={adding}
+        onOpenChange={setAdding}
+      />
       <PriceEditDialog key={editing?.id ?? "closed"} item={editing} open={Boolean(editing)} onOpenChange={(open) => !open && setEditing(null)} />
     </div>
   );

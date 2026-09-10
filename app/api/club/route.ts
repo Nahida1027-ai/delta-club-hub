@@ -193,6 +193,110 @@ export async function POST(request: Request) {
     const action = payload.action;
     const db = getD1();
 
+    if (action === "add_worker") {
+      const rawWorker = (payload.worker ?? {}) as Record<string, unknown>;
+      const workerId = String(rawWorker.id ?? "").trim();
+      const name = String(rawWorker.name ?? "").trim();
+      const tier = String(rawWorker.tier ?? "") as WorkerTier;
+      if (!workerId || workerId.length > 128) throw new Error("打手 ID 无效");
+      if (!name) throw new Error("请输入打手姓名");
+      if (Array.from(name).length > 20) throw new Error("打手姓名最多 20 个字符");
+      if (!["1档", "2档", "3档"].includes(tier)) throw new Error("请选择有效档位");
+
+      const result = await db
+        .prepare("INSERT INTO workers (id, name, tier, status, total_completed_orders) SELECT ?, ?, ?, 'idle', 0 WHERE NOT EXISTS (SELECT 1 FROM workers WHERE name = ? COLLATE NOCASE)")
+        .bind(workerId, name, tier, name)
+        .run();
+      if (!result.meta.changes) {
+        return Response.json(
+          { error: "已存在同名打手，请使用其他姓名" },
+          { status: 409 },
+        );
+      }
+      const createdWorker: Worker = {
+        id: workerId,
+        name,
+        tier,
+        status: "idle",
+        total_completed_orders: 0,
+      };
+      return Response.json({
+        ...(await readClubData()),
+        created_worker: createdWorker,
+      });
+    }
+
+    if (action === "add_menu_item") {
+      const rawItem = (payload.item ?? {}) as Record<string, unknown>;
+      const itemId = String(rawItem.id ?? "").trim();
+      const serviceName = String(rawItem.service_name ?? "").trim();
+      const splitType = String(rawItem.split_type ?? "") as SplitType;
+      if (!itemId || itemId.length > 128) throw new Error("服务 ID 无效");
+      if (Array.from(serviceName).length > 60) throw new Error("服务名称最多 60 个字符");
+      if (!["single", "equal", "tiered"].includes(splitType)) {
+        throw new Error("请选择有效分配模式");
+      }
+
+      const rawRatios = (rawItem.tiered_ratios ?? null) as Partial<TieredRatios> | null;
+      const providedTiers = Array.isArray(rawItem.eligible_tiers)
+        ? rawItem.eligible_tiers.map(String)
+        : [];
+      if (providedTiers.some((tier) => !["1档", "2档", "3档"].includes(tier))) {
+        throw new Error("可接档位配置无效");
+      }
+      const eligibleTiers = splitType === "tiered"
+        ? (["1档", "2档"] as WorkerTier[])
+        : ([...new Set(providedTiers)] as WorkerTier[]);
+      const item: PriceMenuItem = {
+        id: itemId,
+        service_name: serviceName,
+        base_price: Number(rawItem.base_price),
+        club_commission_rate: Number(rawItem.club_commission_rate),
+        split_type: splitType,
+        tiered_ratios: splitType === "tiered"
+          ? {
+              "1档": Number(rawRatios?.["1档"]),
+              "2档": Number(rawRatios?.["2档"]),
+            }
+          : null,
+        eligible_tiers: eligibleTiers,
+      };
+      if (toCents(item.base_price) <= 0) throw new Error("基础价格必须大于 0");
+      if (
+        item.split_type === "tiered" &&
+        (!Number.isFinite(item.tiered_ratios?.["1档"]) ||
+          !Number.isFinite(item.tiered_ratios?.["2档"]))
+      ) {
+        throw new Error("请填写有效的档位占比");
+      }
+      validateMenuRule(item);
+
+      const result = await db
+        .prepare("INSERT INTO price_menu (id, service_name, base_price_cents, club_commission_bps, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM price_menu WHERE service_name = ? COLLATE NOCASE)")
+        .bind(
+          item.id,
+          item.service_name,
+          toCents(item.base_price),
+          Math.round(item.club_commission_rate * 100),
+          item.split_type,
+          item.split_type === "tiered" ? JSON.stringify(item.tiered_ratios) : null,
+          JSON.stringify(item.eligible_tiers),
+          new Date().toISOString(),
+          item.service_name,
+        )
+        .run();
+      if (!result.meta.changes) {
+        return Response.json(
+          { error: "已存在同名服务，请使用其他名称" },
+          { status: 409 },
+        );
+      }
+      return Response.json({
+        ...(await readClubData()),
+        created_menu_item: item,
+      });
+    }
+
     if (action === "update_worker") {
       const workerId = String(payload.worker_id ?? "");
       const data = (payload.data ?? {}) as Record<string, unknown>;
