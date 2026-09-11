@@ -515,7 +515,7 @@ function OrderDesk({
   return (
     <div className="space-y-8">
       <SectionTitle eyebrow="ORDER DESK" title="老板点单" detail="服务规则在下单瞬间冻结，后续调价不会改变这张订单。" />
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid items-stretch gap-4 lg:grid-cols-3">
         <AnimatePresence initial={false} mode="popLayout">
           {menu.map((item, index) => {
           const available = workers.filter(
@@ -529,10 +529,10 @@ function OrderDesk({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, x: -48, scale: 0.98 }}
               transition={{ delay: index * 0.05 }}
-              className={`${glassCard} group relative overflow-hidden p-5 sm:p-6`}
+              className={`${glassCard} group relative flex h-full flex-col overflow-hidden p-5 sm:p-6`}
             >
               <div className="absolute -right-10 -top-10 size-32 rounded-full bg-[#007AFF]/10 blur-3xl transition group-hover:bg-[#007AFF]/18" />
-              <div className="relative">
+              <div className="relative flex h-full flex-1 flex-col">
                 <div className="flex items-start justify-between gap-4">
                   <span className="grid size-11 place-items-center rounded-2xl bg-[#007AFF]/14 text-[#64D2FF]">
                     {item.split_type === "single" ? <Target className="size-5" /> : item.split_type === "equal" ? <Users className="size-5" /> : <Sparkles className="size-5" />}
@@ -542,7 +542,10 @@ function OrderDesk({
                 <h3 className="mt-5 text-lg font-semibold text-white">{item.service_name}</h3>
                 <p className="mt-2 text-[32px] font-semibold tracking-[-0.045em] text-white">{formatMoney(item.base_price)}</p>
                 <div className="mt-4"><ServiceRule item={item} /></div>
-                <div className="mt-6 flex gap-2">
+                {!available || (item.split_type !== "single" && available < 2) ? (
+                  <p className="mt-3 text-sm text-[#FF6961]">匹配的空闲打手不足，暂时无法派单</p>
+                ) : null}
+                <div className="mt-auto flex gap-2 pt-6">
                   {item.split_type === "single" ? (
                     <>
                       <Button disabled={!available || isMutating} onClick={() => autoAssign(item)} className="h-11 flex-1 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]">
@@ -558,9 +561,6 @@ function OrderDesk({
                     </Button>
                   )}
                 </div>
-                {!available || (item.split_type !== "single" && available < 2) ? (
-                  <p className="mt-3 text-sm text-[#FF6961]">匹配的空闲打手不足，暂时无法派单</p>
-                ) : null}
               </div>
             </motion.article>
           );
