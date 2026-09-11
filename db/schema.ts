@@ -13,7 +13,11 @@ export const priceMenu = sqliteTable("price_menu", {
   id: text("id").primaryKey(),
   serviceName: text("service_name").notNull(),
   basePriceCents: integer("base_price_cents").notNull(),
+  commissionMode: text("commission_mode").notNull().default("uniform"),
   clubCommissionBps: integer("club_commission_bps").notNull().default(0),
+  tierCommissionRatesJson: text("tier_commission_rates_json")
+    .notNull()
+    .default('{"1档":0,"2档":0,"3档":0}'),
   splitType: text("split_type").notNull(),
   tieredRatiosJson: text("tiered_ratios_json"),
   eligibleTiersJson: text("eligible_tiers_json").notNull(),
@@ -30,6 +34,11 @@ export const orders = sqliteTable(
     tipCents: integer("tip_cents").notNull().default(0),
     finalClubIncomeCents: integer("final_club_income_cents"),
     finalWorkerIncomesJson: text("final_worker_incomes_json").notNull().default("[]"),
+    specialRequirementsJson: text("special_requirements_json").notNull().default("[]"),
+    basePriceSnapshotCents: integer("base_price_snapshot_cents").notNull().default(0),
+    specialTotalCents: integer("special_total_cents").notNull().default(0),
+    totalPriceCents: integer("total_price_cents").notNull().default(0),
+    orderOriginalTotalCents: integer("order_original_total_cents").notNull().default(0),
     pricingSnapshotJson: text("pricing_snapshot_json").notNull(),
     settlementToken: text("settlement_token"),
     createdAt: text("created_at").notNull(),

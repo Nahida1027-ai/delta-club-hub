@@ -8,6 +8,13 @@
       "when": 1788956810660,
       "tag": "0000_slimy_chamber",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789114159267,
+      "tag": "0001_far_red_hulk",
+      "breakpoints": true
     }
   ]
 }

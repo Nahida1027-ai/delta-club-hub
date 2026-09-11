@@ -1,10 +1,13 @@
 import { getD1 } from "@/db";
 import type {
   ClubData,
+  CommissionMode,
   Order,
   OrderPricingSnapshot,
   PriceMenuItem,
+  SpecialRequirement,
   SplitType,
+  TierCommissionRates,
   TieredRatios,
   Worker,
   WorkerIncome,
@@ -13,7 +16,10 @@ import type {
 import {
   buildPayoutWeights,
   calculateSettlement,
+  defaultTierCommissionRates,
   fromCents,
+  normalizeSpecialRequirements,
+  specialRequirementsTotal,
   toCents,
   validateMenuRule,
 } from "@/lib/settlement";
@@ -32,7 +38,9 @@ interface MenuRow {
   id: string;
   service_name: string;
   base_price_cents: number;
+  commission_mode: string;
   club_commission_bps: number;
+  tier_commission_rates_json: string;
   split_type: SplitType;
   tiered_ratios_json: string | null;
   eligible_tiers_json: string;
@@ -46,9 +54,93 @@ interface OrderRow {
   tip_cents: number;
   final_club_income_cents: number | null;
   final_worker_incomes_json: string;
+  special_requirements_json: string;
+  base_price_snapshot_cents: number;
+  special_total_cents: number;
+  total_price_cents: number;
+  order_original_total_cents: number;
   pricing_snapshot_json: string;
   created_at: string;
   completed_at: string | null;
+}
+
+function normalizeCommissionMode(value: unknown): CommissionMode {
+  return value === "by_tier" ? "by_tier" : "uniform";
+}
+
+function normalizeCommissionRate(value: unknown, label: string) {
+  const rate = Number(value ?? 0);
+  const basisPoints = Math.round(rate * 100);
+  if (!Number.isFinite(rate) || rate < 0 || !Number.isSafeInteger(basisPoints)) {
+    throw new Error(`${label}必须是非负数字`);
+  }
+  return basisPoints / 100;
+}
+
+function normalizeTierCommissionRates(value: unknown): TierCommissionRates {
+  const parsed = typeof value === "string" ? JSON.parse(value) : value;
+  if (parsed === undefined || parsed === null) return defaultTierCommissionRates();
+  if (typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("按档位抽成配置无效");
+  }
+  const rates = parsed as Partial<Record<WorkerTier, unknown>>;
+  return {
+    "1档": normalizeCommissionRate(rates["1档"], "1档抽成"),
+    "2档": normalizeCommissionRate(rates["2档"], "2档抽成"),
+    "3档": normalizeCommissionRate(rates["3档"], "3档抽成"),
+  };
+}
+
+function normalizePricingSnapshot(value: unknown): OrderPricingSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("订单价格快照无效");
+  }
+  const snapshot = value as Partial<OrderPricingSnapshot>;
+  return {
+    ...(snapshot as OrderPricingSnapshot),
+    commission_mode: normalizeCommissionMode(snapshot.commission_mode),
+    club_commission_rate: normalizeCommissionRate(
+      snapshot.club_commission_rate,
+      "统一抽成",
+    ),
+    tier_commission_rates: normalizeTierCommissionRates(
+      snapshot.tier_commission_rates,
+    ),
+  };
+}
+
+function parsePricingSnapshot(json: string) {
+  return normalizePricingSnapshot(JSON.parse(json) as unknown);
+}
+
+function parseSpecialRequirements(value: unknown) {
+  return normalizeSpecialRequirements(
+    (value ?? []) as SpecialRequirement[],
+  );
+}
+
+function parseStoredSpecialRequirements(json: string) {
+  return parseSpecialRequirements(JSON.parse(json) as unknown);
+}
+
+function orderAmountsFromRow(row: OrderRow, snapshot: OrderPricingSnapshot) {
+  const basePriceSnapshotCents = row.base_price_snapshot_cents > 0
+    ? row.base_price_snapshot_cents
+    : toCents(snapshot.base_price);
+  const specialTotalCents = row.special_total_cents;
+  const totalPriceCents = row.total_price_cents > 0
+    ? row.total_price_cents
+    : basePriceSnapshotCents + specialTotalCents;
+  const orderOriginalTotalCents = row.order_original_total_cents > 0
+    ? row.order_original_total_cents
+    : totalPriceCents;
+
+  return {
+    basePriceSnapshotCents,
+    specialTotalCents,
+    totalPriceCents,
+    orderOriginalTotalCents,
+  };
 }
 
 function chinaMonthDate(day: number, hour = 12) {
@@ -73,7 +165,9 @@ function seedSnapshot(
   return {
     service_name: serviceName,
     base_price: basePrice,
+    commission_mode: "uniform",
     club_commission_rate: commission,
+    tier_commission_rates: defaultTierCommissionRates(),
     split_type: splitType,
     tiered_ratios: ratios,
     payout_weights: workers.map((worker) => ({
@@ -95,6 +189,8 @@ async function ensureSeeded() {
   const now = new Date().toISOString();
   const allTiers = JSON.stringify(["1档", "2档", "3档"]);
   const tieredTiers = JSON.stringify(["1档", "2档"]);
+  const emptyTierCommissions = JSON.stringify(defaultTierCommissionRates());
+  const noSpecialRequirements = JSON.stringify([]);
 
   const snapshots = {
     single: seedSnapshot("排位代练 · 单排", 200, 30, "single", [
@@ -124,12 +220,12 @@ async function ensureSeeded() {
     db.prepare("INSERT OR IGNORE INTO workers (id, name, tier, status, total_completed_orders) VALUES (?, ?, ?, 'idle', ?)").bind("worker-beichen", "北辰", "2档", 1),
     db.prepare("INSERT OR IGNORE INTO workers (id, name, tier, status, total_completed_orders) VALUES (?, ?, ?, 'idle', ?)").bind("worker-shangui", "山鬼", "3档", 0),
     db.prepare("INSERT OR IGNORE INTO workers (id, name, tier, status, total_completed_orders) VALUES (?, ?, ?, 'idle', ?)").bind("worker-luoshen", "洛神", "3档", 0),
-    db.prepare("INSERT OR IGNORE INTO price_menu (id, service_name, base_price_cents, club_commission_bps, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind("menu-single", "排位代练 · 单排", 20_000, 3_000, "single", null, allTiers, now),
-    db.prepare("INSERT OR IGNORE INTO price_menu (id, service_name, base_price_cents, club_commission_bps, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind("menu-equal", "护航双排", 36_000, 1_000, "equal", null, allTiers, now),
-    db.prepare("INSERT OR IGNORE INTO price_menu (id, service_name, base_price_cents, club_commission_bps, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind("menu-tiered", "巅峰冲刺 · 档位协作", 50_000, 2_000, "tiered", JSON.stringify({ "1档": 60, "2档": 40 }), tieredTiers, now),
-    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)").bind("order-demo-single", "menu-single", JSON.stringify(["worker-hanxing"]), 0, 6_000, JSON.stringify([{ workerId: "worker-hanxing", amount: 140 }]), JSON.stringify(snapshots.single), chinaMonthDate(2, 20), chinaMonthDate(2, 21)),
-    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)").bind("order-demo-equal", "menu-equal", JSON.stringify(["worker-muye", "worker-beichen"]), 4_000, 3_600, JSON.stringify([{ workerId: "worker-muye", amount: 182 }, { workerId: "worker-beichen", amount: 182 }]), JSON.stringify(snapshots.equal), chinaMonthDate(4, 19), chinaMonthDate(4, 22)),
-    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)").bind("order-demo-tiered", "menu-tiered", JSON.stringify(["worker-hanxing", "worker-muye"]), 5_000, 10_000, JSON.stringify([{ workerId: "worker-hanxing", amount: 270 }, { workerId: "worker-muye", amount: 180 }]), JSON.stringify(snapshots.tiered), chinaMonthDate(7, 20), chinaMonthDate(7, 23)),
+    db.prepare("INSERT OR IGNORE INTO price_menu (id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("menu-single", "排位代练 · 单排", 20_000, "uniform", 3_000, emptyTierCommissions, "single", null, allTiers, now),
+    db.prepare("INSERT OR IGNORE INTO price_menu (id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("menu-equal", "护航双排", 36_000, "uniform", 1_000, emptyTierCommissions, "equal", null, allTiers, now),
+    db.prepare("INSERT OR IGNORE INTO price_menu (id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("menu-tiered", "巅峰冲刺 · 档位协作", 50_000, "uniform", 2_000, emptyTierCommissions, "tiered", JSON.stringify({ "1档": 60, "2档": 40 }), tieredTiers, now),
+    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("order-demo-single", "menu-single", JSON.stringify(["worker-hanxing"]), 0, 6_000, JSON.stringify([{ workerId: "worker-hanxing", amount: 140 }]), noSpecialRequirements, 20_000, 0, 20_000, 20_000, JSON.stringify(snapshots.single), chinaMonthDate(2, 20), chinaMonthDate(2, 21)),
+    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("order-demo-equal", "menu-equal", JSON.stringify(["worker-muye", "worker-beichen"]), 4_000, 3_600, JSON.stringify([{ workerId: "worker-muye", amount: 182 }, { workerId: "worker-beichen", amount: 182 }]), noSpecialRequirements, 36_000, 0, 36_000, 36_000, JSON.stringify(snapshots.equal), chinaMonthDate(4, 19), chinaMonthDate(4, 22)),
+    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("order-demo-tiered", "menu-tiered", JSON.stringify(["worker-hanxing", "worker-muye"]), 5_000, 10_000, JSON.stringify([{ workerId: "worker-hanxing", amount: 270 }, { workerId: "worker-muye", amount: 180 }]), noSpecialRequirements, 50_000, 0, 50_000, 50_000, JSON.stringify(snapshots.tiered), chinaMonthDate(7, 20), chinaMonthDate(7, 23)),
   ]);
 }
 
@@ -137,8 +233,8 @@ async function readClubData(): Promise<ClubData> {
   const db = getD1();
   const [workerResult, menuResult, orderResult] = await Promise.all([
     db.prepare("SELECT id, name, tier, status, total_completed_orders FROM workers ORDER BY tier, name").all<WorkerRow>(),
-    db.prepare("SELECT id, service_name, base_price_cents, club_commission_bps, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu ORDER BY id").all<MenuRow>(),
-    db.prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at FROM orders ORDER BY created_at DESC").all<OrderRow>(),
+    db.prepare("SELECT id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu ORDER BY id").all<MenuRow>(),
+    db.prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders ORDER BY created_at DESC").all<OrderRow>(),
   ]);
 
   const workers: Worker[] = workerResult.results.map((row) => ({ ...row }));
@@ -146,24 +242,35 @@ async function readClubData(): Promise<ClubData> {
     id: row.id,
     service_name: row.service_name,
     base_price: fromCents(row.base_price_cents),
+    commission_mode: normalizeCommissionMode(row.commission_mode),
     club_commission_rate: row.club_commission_bps / 100,
+    tier_commission_rates: normalizeTierCommissionRates(row.tier_commission_rates_json),
     split_type: row.split_type,
     tiered_ratios: row.tiered_ratios_json ? JSON.parse(row.tiered_ratios_json) : null,
     eligible_tiers: JSON.parse(row.eligible_tiers_json),
   }));
-  const orders: Order[] = orderResult.results.map((row) => ({
-    id: row.id,
-    menu_item_id: row.menu_item_id,
-    assigned_worker_ids: JSON.parse(row.assigned_worker_ids_json),
-    status: row.status,
-    tip: fromCents(row.tip_cents),
-    final_club_income:
-      row.final_club_income_cents === null ? null : fromCents(row.final_club_income_cents),
-    final_worker_incomes: JSON.parse(row.final_worker_incomes_json) as WorkerIncome[],
-    pricing_snapshot: JSON.parse(row.pricing_snapshot_json),
-    created_at: row.created_at,
-    completed_at: row.completed_at,
-  }));
+  const orders: Order[] = orderResult.results.map((row) => {
+    const pricingSnapshot = parsePricingSnapshot(row.pricing_snapshot_json);
+    const amounts = orderAmountsFromRow(row, pricingSnapshot);
+    return {
+      id: row.id,
+      menu_item_id: row.menu_item_id,
+      assigned_worker_ids: JSON.parse(row.assigned_worker_ids_json),
+      status: row.status,
+      tip: fromCents(row.tip_cents),
+      final_club_income:
+        row.final_club_income_cents === null ? null : fromCents(row.final_club_income_cents),
+      final_worker_incomes: JSON.parse(row.final_worker_incomes_json) as WorkerIncome[],
+      special_requirements: parseStoredSpecialRequirements(row.special_requirements_json),
+      base_price_snapshot: fromCents(amounts.basePriceSnapshotCents),
+      special_total: fromCents(amounts.specialTotalCents),
+      total_price: fromCents(amounts.totalPriceCents),
+      order_original_total: fromCents(amounts.orderOriginalTotalCents),
+      pricing_snapshot: pricingSnapshot,
+      created_at: row.created_at,
+      completed_at: row.completed_at,
+    };
+  });
 
   return { workers, menu, orders };
 }
@@ -231,6 +338,11 @@ export async function POST(request: Request) {
       const itemId = String(rawItem.id ?? "").trim();
       const serviceName = String(rawItem.service_name ?? "").trim();
       const splitType = String(rawItem.split_type ?? "") as SplitType;
+      const rawCommissionMode = rawItem.commission_mode ?? "uniform";
+      if (rawCommissionMode !== "uniform" && rawCommissionMode !== "by_tier") {
+        throw new Error("请选择有效抽成模式");
+      }
+      const commissionMode = rawCommissionMode as CommissionMode;
       if (!itemId || itemId.length > 128) throw new Error("服务 ID 无效");
       if (Array.from(serviceName).length > 60) throw new Error("服务名称最多 60 个字符");
       if (!["single", "equal", "tiered"].includes(splitType)) {
@@ -250,8 +362,15 @@ export async function POST(request: Request) {
       const item: PriceMenuItem = {
         id: itemId,
         service_name: serviceName,
-        base_price: Number(rawItem.base_price),
-        club_commission_rate: Number(rawItem.club_commission_rate),
+        base_price: fromCents(toCents(Number(rawItem.base_price))),
+        commission_mode: commissionMode,
+        club_commission_rate: normalizeCommissionRate(
+          rawItem.club_commission_rate,
+          "统一抽成",
+        ),
+        tier_commission_rates: normalizeTierCommissionRates(
+          rawItem.tier_commission_rates,
+        ),
         split_type: splitType,
         tiered_ratios: splitType === "tiered"
           ? {
@@ -272,12 +391,14 @@ export async function POST(request: Request) {
       validateMenuRule(item);
 
       const result = await db
-        .prepare("INSERT INTO price_menu (id, service_name, base_price_cents, club_commission_bps, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM price_menu WHERE service_name = ? COLLATE NOCASE)")
+        .prepare("INSERT INTO price_menu (id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM price_menu WHERE service_name = ? COLLATE NOCASE)")
         .bind(
           item.id,
           item.service_name,
           toCents(item.base_price),
+          item.commission_mode,
           Math.round(item.club_commission_rate * 100),
+          JSON.stringify(item.tier_commission_rates),
           item.split_type,
           item.split_type === "tiered" ? JSON.stringify(item.tiered_ratios) : null,
           JSON.stringify(item.eligible_tiers),
@@ -327,7 +448,7 @@ export async function POST(request: Request) {
     if (action === "delete_historical_order") {
       const orderId = String(payload.order_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "completed") {
@@ -356,7 +477,7 @@ export async function POST(request: Request) {
       }
 
       const orderResult = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at FROM orders")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders")
         .all<OrderRow>();
       const relatedOrders = orderResult.results.filter((order) =>
         (JSON.parse(order.assigned_worker_ids_json) as string[]).includes(workerId),
@@ -391,7 +512,7 @@ export async function POST(request: Request) {
       const orderId = String(payload.order_id ?? "");
       const oldWorkerId = String(payload.old_worker_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "active") {
@@ -400,7 +521,11 @@ export async function POST(request: Request) {
 
       const assignedWorkerIds = JSON.parse(row.assigned_worker_ids_json) as string[];
       if (!assignedWorkerIds.includes(oldWorkerId)) throw new Error("该打手不属于当前订单");
-      const snapshot = JSON.parse(row.pricing_snapshot_json) as OrderPricingSnapshot;
+      const snapshot = parsePricingSnapshot(row.pricing_snapshot_json);
+      const specialRequirements = parseStoredSpecialRequirements(
+        row.special_requirements_json,
+      );
+      const amounts = orderAmountsFromRow(row, snapshot);
       const oldWeight = snapshot.payout_weights.find(
         (entry) => entry.workerId === oldWorkerId,
       );
@@ -408,7 +533,7 @@ export async function POST(request: Request) {
 
       const [menuRow, workerResult] = await Promise.all([
         db
-          .prepare("SELECT id, service_name, base_price_cents, club_commission_bps, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu WHERE id = ?")
+          .prepare("SELECT id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu WHERE id = ?")
           .bind(row.menu_item_id)
           .first<MenuRow>(),
         db
@@ -424,12 +549,38 @@ export async function POST(request: Request) {
       const eligibleTiers = snapshot.split_type === "tiered"
         ? [oldWeight.tier]
         : (JSON.parse(menuRow.eligible_tiers_json) as WorkerTier[]);
-      const replacement = workerResult.results.find(
-        (worker) =>
-          worker.status === "idle" &&
-          !assignedWorkerIds.includes(worker.id) &&
-          eligibleTiers.includes(worker.tier),
-      );
+      const replacement = workerResult.results.find((worker) => {
+        if (
+          worker.status !== "idle" ||
+          assignedWorkerIds.includes(worker.id) ||
+          !eligibleTiers.includes(worker.tier)
+        ) {
+          return false;
+        }
+        const candidateSnapshot: OrderPricingSnapshot = {
+          ...snapshot,
+          payout_weights: snapshot.payout_weights.map((entry) =>
+            entry.workerId === oldWorkerId
+              ? {
+                  ...entry,
+                  workerId: worker.id,
+                  workerName: worker.name,
+                  tier: worker.tier,
+                }
+              : entry,
+          ),
+        };
+        try {
+          calculateSettlement(
+            candidateSnapshot,
+            0,
+            fromCents(amounts.orderOriginalTotalCents),
+          );
+          return true;
+        } catch {
+          return false;
+        }
+      });
       if (!replacement) {
         return Response.json(
           { error: "当前无空闲打手可替换，请稍后再试" },
@@ -454,11 +605,31 @@ export async function POST(request: Request) {
             : entry,
         ),
       };
+      // 换人后仍沿用原订单冻结的价格与抽成规则，只根据新打手快照档位取档位抽成。
+      calculateSettlement(
+        newSnapshot,
+        0,
+        fromCents(amounts.orderOriginalTotalCents),
+      );
       const createdAt = new Date().toISOString();
       const [insertResult, , , deleteResult] = await db.batch([
         db
-          .prepare("INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_worker_incomes_json, pricing_snapshot_json, created_at) SELECT ?, ?, ?, 'active', 0, '[]', ?, ? WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
-          .bind(newOrderId, row.menu_item_id, JSON.stringify(newAssignedWorkerIds), JSON.stringify(newSnapshot), createdAt, orderId, oldWorkerId, replacement.id),
+          .prepare("INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
+          .bind(
+            newOrderId,
+            row.menu_item_id,
+            JSON.stringify(newAssignedWorkerIds),
+            JSON.stringify(specialRequirements),
+            amounts.basePriceSnapshotCents,
+            amounts.specialTotalCents,
+            amounts.totalPriceCents,
+            amounts.orderOriginalTotalCents,
+            JSON.stringify(newSnapshot),
+            createdAt,
+            orderId,
+            oldWorkerId,
+            replacement.id,
+          ),
         db.prepare("UPDATE workers SET status = 'busy' WHERE id = ? AND status = 'idle' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(replacement.id, newOrderId),
         db.prepare("UPDATE workers SET status = 'idle' WHERE id = ? AND status = 'busy' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(oldWorkerId, newOrderId),
         db.prepare("DELETE FROM orders WHERE id = ? AND status = 'active' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(orderId, newOrderId),
@@ -477,14 +648,65 @@ export async function POST(request: Request) {
     }
 
     if (action === "update_menu") {
-      const item = payload.item as PriceMenuItem;
+      const rawItem = (payload.item ?? {}) as Record<string, unknown>;
+      const itemId = String(rawItem.id ?? "").trim();
+      const serviceName = String(rawItem.service_name ?? "").trim();
+      const splitType = String(rawItem.split_type ?? "") as SplitType;
+      const rawCommissionMode = rawItem.commission_mode ?? "uniform";
+      if (!itemId || itemId.length > 128) throw new Error("服务 ID 无效");
+      if (Array.from(serviceName).length > 60) throw new Error("服务名称最多 60 个字符");
+      if (!["single", "equal", "tiered"].includes(splitType)) {
+        throw new Error("请选择有效分配模式");
+      }
+      if (rawCommissionMode !== "uniform" && rawCommissionMode !== "by_tier") {
+        throw new Error("请选择有效抽成模式");
+      }
+      const rawRatios = (rawItem.tiered_ratios ?? null) as Partial<TieredRatios> | null;
+      const providedTiers = Array.isArray(rawItem.eligible_tiers)
+        ? rawItem.eligible_tiers.map(String)
+        : [];
+      if (providedTiers.some((tier) => !["1档", "2档", "3档"].includes(tier))) {
+        throw new Error("可接档位配置无效");
+      }
+      const item: PriceMenuItem = {
+        id: itemId,
+        service_name: serviceName,
+        base_price: fromCents(toCents(Number(rawItem.base_price))),
+        commission_mode: rawCommissionMode,
+        club_commission_rate: normalizeCommissionRate(
+          rawItem.club_commission_rate,
+          "统一抽成",
+        ),
+        tier_commission_rates: normalizeTierCommissionRates(
+          rawItem.tier_commission_rates,
+        ),
+        split_type: splitType,
+        tiered_ratios: splitType === "tiered"
+          ? {
+              "1档": Number(rawRatios?.["1档"]),
+              "2档": Number(rawRatios?.["2档"]),
+            }
+          : null,
+        eligible_tiers: splitType === "tiered"
+          ? ["1档", "2档"]
+          : ([...new Set(providedTiers)] as WorkerTier[]),
+      };
+      if (
+        item.split_type === "tiered" &&
+        (!Number.isFinite(item.tiered_ratios?.["1档"]) ||
+          !Number.isFinite(item.tiered_ratios?.["2档"]))
+      ) {
+        throw new Error("请填写有效的档位占比");
+      }
       validateMenuRule(item);
       const result = await db
-        .prepare("UPDATE price_menu SET service_name = ?, base_price_cents = ?, club_commission_bps = ?, split_type = ?, tiered_ratios_json = ?, eligible_tiers_json = ?, updated_at = ? WHERE id = ?")
+        .prepare("UPDATE price_menu SET service_name = ?, base_price_cents = ?, commission_mode = ?, club_commission_bps = ?, tier_commission_rates_json = ?, split_type = ?, tiered_ratios_json = ?, eligible_tiers_json = ?, updated_at = ? WHERE id = ?")
         .bind(
           item.service_name.trim(),
           toCents(item.base_price),
+          item.commission_mode,
           Math.round(item.club_commission_rate * 100),
+          JSON.stringify(item.tier_commission_rates),
           item.split_type,
           item.split_type === "tiered" ? JSON.stringify(item.tiered_ratios) : null,
           JSON.stringify(item.split_type === "tiered" ? ["1档", "2档"] : item.eligible_tiers),
@@ -501,12 +723,15 @@ export async function POST(request: Request) {
       const workerIds = Array.isArray(payload.assigned_worker_ids)
         ? payload.assigned_worker_ids.map(String)
         : [];
+      const specialRequirements = parseSpecialRequirements(
+        payload.special_requirements ?? [],
+      );
       if (!workerIds.length || new Set(workerIds).size !== workerIds.length) {
         throw new Error("请选择不重复的打手");
       }
 
       const menuRow = await db
-        .prepare("SELECT id, service_name, base_price_cents, club_commission_bps, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu WHERE id = ?")
+        .prepare("SELECT id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu WHERE id = ?")
         .bind(menuItemId)
         .first<MenuRow>();
       if (!menuRow) throw new Error("服务项目不存在");
@@ -531,19 +756,49 @@ export async function POST(request: Request) {
         ? (JSON.parse(menuRow.tiered_ratios_json) as TieredRatios)
         : null;
       const payoutWeights = buildPayoutWeights(menuRow.split_type, selectedWorkers, ratios);
+      const basePriceSnapshotCents = menuRow.base_price_cents;
+      const specialTotalCents = toCents(
+        specialRequirementsTotal(specialRequirements),
+      );
+      const totalPriceCents = basePriceSnapshotCents + specialTotalCents;
+      if (!Number.isSafeInteger(totalPriceCents)) {
+        throw new Error("订单总金额超出安全范围");
+      }
+      const totalPrice = fromCents(totalPriceCents);
+      // 再次走金额校验，确保多项加价求和后仍未超过全局安全上限。
+      toCents(totalPrice);
       const snapshot: OrderPricingSnapshot = {
         service_name: menuRow.service_name,
         base_price: fromCents(menuRow.base_price_cents),
+        commission_mode: normalizeCommissionMode(menuRow.commission_mode),
         club_commission_rate: menuRow.club_commission_bps / 100,
+        tier_commission_rates: normalizeTierCommissionRates(
+          menuRow.tier_commission_rates_json,
+        ),
         split_type: menuRow.split_type,
         tiered_ratios: ratios,
         payout_weights: payoutWeights,
       };
+      // 服务端权威校验本次实际打手组合，阻止双人档位抽成合计超过订单原始总价。
+      calculateSettlement(snapshot, 0, totalPrice);
       const orderId = crypto.randomUUID();
       const createdAt = new Date().toISOString();
       const idleCheck = `SELECT COUNT(*) FROM workers WHERE id IN (${placeholders}) AND status = 'idle'`;
       const [insertResult] = await db.batch([
-        db.prepare(`INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_worker_incomes_json, pricing_snapshot_json, created_at) SELECT ?, ?, ?, 'active', 0, '[]', ?, ? WHERE (${idleCheck}) = ?`).bind(orderId, menuItemId, JSON.stringify(workerIds), JSON.stringify(snapshot), createdAt, ...workerIds, workerIds.length),
+        db.prepare(`INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE (${idleCheck}) = ?`).bind(
+          orderId,
+          menuItemId,
+          JSON.stringify(workerIds),
+          JSON.stringify(specialRequirements),
+          basePriceSnapshotCents,
+          specialTotalCents,
+          totalPriceCents,
+          totalPriceCents,
+          JSON.stringify(snapshot),
+          createdAt,
+          ...workerIds,
+          workerIds.length,
+        ),
         db.prepare(`UPDATE workers SET status = 'busy' WHERE id IN (${placeholders}) AND EXISTS (SELECT 1 FROM orders WHERE id = ?)`).bind(...workerIds, orderId),
       ]);
       if (!insertResult.meta.changes) {
@@ -557,15 +812,27 @@ export async function POST(request: Request) {
       const tip = Number(payload.tip ?? 0);
       toCents(tip);
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "active") {
         return Response.json({ error: "订单已结束或不存在，未重复结算" }, { status: 409 });
       }
 
-      const snapshot = JSON.parse(row.pricing_snapshot_json) as OrderPricingSnapshot;
-      const settlement = calculateSettlement(snapshot, tip);
+      const snapshot = parsePricingSnapshot(row.pricing_snapshot_json);
+      const amounts = orderAmountsFromRow(row, snapshot);
+      /*
+       * 权威结算公式（整数分）：
+       * 1. 订单原始总价 = 下单基础价快照 + 特殊需求加价合计，二者全部参与抽成。
+       * 2. uniform 只抽一次；by_tier 对每名打手按快照档位分别以订单原始总价计提后求和。
+       * 3. 打手基础池 = 订单原始总价 - 俱乐部总抽成。
+       * 4. 最终打手池 = 打手基础池 + 打赏；打赏不抽成，按原 split 权重一并分配。
+       */
+      const settlement = calculateSettlement(
+        snapshot,
+        tip,
+        fromCents(amounts.orderOriginalTotalCents),
+      );
       const workerIds = JSON.parse(row.assigned_worker_ids_json) as string[];
       const placeholders = workerIds.map(() => "?").join(", ");
       const completedAt = new Date().toISOString();

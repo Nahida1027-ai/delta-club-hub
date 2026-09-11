@@ -4,6 +4,8 @@ export type WorkerStatus = "idle" | "busy";
 
 export type SplitType = "single" | "equal" | "tiered";
 
+export type CommissionMode = "uniform" | "by_tier";
+
 export interface Worker {
   id: string;
   name: string;
@@ -17,11 +19,24 @@ export interface TieredRatios {
   "2档": number;
 }
 
+export interface TierCommissionRates {
+  "1档": number;
+  "2档": number;
+  "3档": number;
+}
+
+export interface SpecialRequirement {
+  name: string;
+  price: number;
+}
+
 export interface PriceMenuItem {
   id: string;
   service_name: string;
   base_price: number;
+  commission_mode: CommissionMode;
   club_commission_rate: number;
+  tier_commission_rates: TierCommissionRates;
   split_type: SplitType;
   tiered_ratios: TieredRatios | null;
   /** 服务允许接单的档位；tiered 固定为 1档 + 2档。 */
@@ -39,7 +54,9 @@ export interface PayoutWeight {
 export interface OrderPricingSnapshot {
   service_name: string;
   base_price: number;
+  commission_mode: CommissionMode;
   club_commission_rate: number;
+  tier_commission_rates: TierCommissionRates;
   split_type: SplitType;
   tiered_ratios: TieredRatios | null;
   payout_weights: PayoutWeight[];
@@ -58,6 +75,11 @@ export interface Order {
   tip: number;
   final_club_income: number | null;
   final_worker_incomes: WorkerIncome[];
+  special_requirements: SpecialRequirement[];
+  base_price_snapshot: number;
+  special_total: number;
+  total_price: number;
+  order_original_total: number;
   created_at: string;
   completed_at: string | null;
   pricing_snapshot: OrderPricingSnapshot;
@@ -75,4 +97,3 @@ export interface SettlementResult {
   worker_pool: number;
   worker_incomes: WorkerIncome[];
 }
-

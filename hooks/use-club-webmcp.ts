@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import type { SpecialRequirement } from "@/lib/club-types";
 import { useClubStore } from "@/store/use-club-store";
 
 function objectInput(input: unknown): Record<string, unknown> {
@@ -40,11 +41,16 @@ export function useClubWebMcp() {
                     id: order.id,
                     serviceName: order.pricing_snapshot.service_name,
                     workerIds: order.assigned_worker_ids,
+                    basePrice: order.base_price_snapshot,
+                    specialTotal: order.special_total,
+                    totalPrice: order.total_price,
+                    specialRequirementCount: order.special_requirements.length,
                   })),
-                services: state.menu.map(({ id, service_name, split_type }) => ({
+                services: state.menu.map(({ id, service_name, split_type, commission_mode }) => ({
                   id,
                   serviceName: service_name,
                   splitType: split_type,
+                  commissionMode: commission_mode,
                 })),
               };
             },
@@ -58,7 +64,7 @@ export function useClubWebMcp() {
           {
             name: "create_club_order",
             title: "创建俱乐部订单",
-            description: "使用一个服务 ID 和符合规则的空闲打手 ID 创建订单，并立即锁定这些打手。",
+            description: "使用服务、符合规则的空闲打手及可选特殊需求创建订单，并立即锁定这些打手。",
             inputSchema: {
               type: "object",
               properties: {
@@ -70,6 +76,20 @@ export function useClubWebMcp() {
                   maxItems: 2,
                   uniqueItems: true,
                   description: "分配的打手 ID；人数必须匹配服务模式",
+                },
+                specialRequirements: {
+                  type: "array",
+                  maxItems: 20,
+                  description: "可选特殊需求；加价会与基础价格一起参与抽成",
+                  items: {
+                    type: "object",
+                    properties: {
+                      name: { type: "string", minLength: 1, maxLength: 60 },
+                      price: { type: "number", minimum: 0, multipleOf: 0.01 },
+                    },
+                    required: ["name", "price"],
+                    additionalProperties: false,
+                  },
                 },
               },
               required: ["menuItemId", "workerIds"],
@@ -85,10 +105,24 @@ export function useClubWebMcp() {
                 if (typeof value !== "string") throw new Error("workerIds 只能包含字符串");
                 return value;
               });
+              const specialRequirements: SpecialRequirement[] = Array.isArray(data.specialRequirements)
+                ? data.specialRequirements.map((value) => {
+                    const requirement = objectInput(value);
+                    if (typeof requirement.name !== "string" || typeof requirement.price !== "number") {
+                      throw new Error("specialRequirements 需要 name 和 price");
+                    }
+                    return { name: requirement.name, price: requirement.price };
+                  })
+                : [];
               const orderId = await useClubStore
                 .getState()
-                .createOrder(data.menuItemId, workerIds);
-              return { orderId, status: "active", lockedWorkerIds: workerIds };
+                .createOrder(data.menuItemId, workerIds, specialRequirements);
+              return {
+                orderId,
+                status: "active",
+                lockedWorkerIds: workerIds,
+                specialRequirementCount: specialRequirements.length,
+              };
             },
           },
           options,
@@ -137,4 +171,3 @@ export function useClubWebMcp() {
     return () => lifecycle.abort();
   }, []);
 }
-

@@ -7,12 +7,17 @@ import type {
   OrderPricingSnapshot,
   PriceMenuItem,
   SettlementResult,
+  SpecialRequirement,
   Worker,
   WorkerTier,
 } from "@/lib/club-types";
 import {
   buildPayoutWeights,
+  calculateSettlement,
+  defaultTierCommissionRates,
   fromCents,
+  normalizeSpecialRequirements,
+  specialRequirementsTotal,
   toCents,
   validateMenuRule,
 } from "@/lib/settlement";
@@ -46,7 +51,11 @@ interface ClubStore extends ClubData {
   deleteHistoricalOrder: (orderId: string) => Promise<void>;
   cancelAndReassign: (orderId: string, oldWorkerId: string) => Promise<ReassignmentResult>;
   updateMenuItem: (item: PriceMenuItem) => Promise<void>;
-  createOrder: (menuItemId: string, workerIds: string[]) => Promise<string>;
+  createOrder: (
+    menuItemId: string,
+    workerIds: string[],
+    specialRequirements?: SpecialRequirement[],
+  ) => Promise<string>;
   finishOrder: (orderId: string, tip: number) => Promise<SettlementResult>;
 }
 
@@ -83,12 +92,29 @@ function findReplacementWorker(
     ? [oldWeight.tier]
     : menuItem?.eligible_tiers ?? [oldWeight.tier];
 
-  return data.workers.find(
-    (worker) =>
-      worker.status === "idle" &&
-      !order.assigned_worker_ids.includes(worker.id) &&
-      eligibleTiers.includes(worker.tier),
-  );
+  return data.workers.find((worker) => {
+    if (
+      worker.status !== "idle" ||
+      order.assigned_worker_ids.includes(worker.id) ||
+      !eligibleTiers.includes(worker.tier)
+    ) {
+      return false;
+    }
+    const replacementSnapshot: OrderPricingSnapshot = {
+      ...order.pricing_snapshot,
+      payout_weights: order.pricing_snapshot.payout_weights.map((entry) =>
+        entry.workerId === oldWorkerId
+          ? { ...entry, workerId: worker.id, workerName: worker.name, tier: worker.tier }
+          : entry,
+      ),
+    };
+    try {
+      calculateSettlement(replacementSnapshot, 0, order.order_original_total);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function decrementCompletionCounts(workers: Worker[], removedOrders: Order[]) {
@@ -201,6 +227,10 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       ...data,
       id: crypto.randomUUID(),
       service_name: data.service_name.trim(),
+      commission_mode: data.commission_mode ?? "uniform",
+      tier_commission_rates: {
+        ...(data.tier_commission_rates ?? defaultTierCommissionRates()),
+      },
       tiered_ratios:
         data.split_type === "tiered" && data.tiered_ratios
           ? { ...data.tiered_ratios }
@@ -414,15 +444,31 @@ export const useClubStore = create<ClubStore>((set, get) => ({
 
   updateMenuItem: async (item) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
-    validateMenuRule(item);
+    const normalizedItem: PriceMenuItem = {
+      ...item,
+      service_name: item.service_name.trim(),
+      commission_mode: item.commission_mode ?? "uniform",
+      tier_commission_rates: {
+        ...(item.tier_commission_rates ?? defaultTierCommissionRates()),
+      },
+      tiered_ratios:
+        item.split_type === "tiered" && item.tiered_ratios
+          ? { ...item.tiered_ratios }
+          : null,
+      eligible_tiers:
+        item.split_type === "tiered" ? ["1档", "2档"] : [...item.eligible_tiers],
+    };
+    validateMenuRule(normalizedItem);
     const previous = { workers: get().workers, menu: get().menu, orders: get().orders };
     set((state) => ({
-      menu: state.menu.map((current) => (current.id === item.id ? item : current)),
+      menu: state.menu.map((current) =>
+        current.id === normalizedItem.id ? normalizedItem : current,
+      ),
       is_mutating: true,
       error: null,
     }));
     try {
-      const data = await apiRequest({ action: "update_menu", item });
+      const data = await apiRequest({ action: "update_menu", item: normalizedItem });
       set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
     } catch (error) {
       set({ ...previous, is_mutating: false });
@@ -430,7 +476,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 
-  createOrder: async (menuItemId, workerIds) => {
+  createOrder: async (menuItemId, workerIds, specialRequirements = []) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
     const menuItem = state.menu.find((item) => item.id === menuItemId);
@@ -447,14 +493,23 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       selectedWorkers,
       menuItem.tiered_ratios,
     );
+    const normalizedRequirements = normalizeSpecialRequirements(specialRequirements);
+    const specialTotal = specialRequirementsTotal(normalizedRequirements);
+    const orderOriginalTotal = fromCents(
+      toCents(menuItem.base_price) + toCents(specialTotal),
+    );
+    toCents(orderOriginalTotal);
     const snapshot: OrderPricingSnapshot = {
       service_name: menuItem.service_name,
       base_price: menuItem.base_price,
+      commission_mode: menuItem.commission_mode,
       club_commission_rate: menuItem.club_commission_rate,
+      tier_commission_rates: { ...menuItem.tier_commission_rates },
       split_type: menuItem.split_type,
       tiered_ratios: menuItem.tiered_ratios,
       payout_weights: payoutWeights,
     };
+    calculateSettlement(snapshot, 0, orderOriginalTotal);
     const optimisticId = `optimistic-${Date.now()}`;
     const optimisticOrder: Order = {
       id: optimisticId,
@@ -464,6 +519,11 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       tip: 0,
       final_club_income: null,
       final_worker_incomes: [],
+      special_requirements: normalizedRequirements,
+      base_price_snapshot: menuItem.base_price,
+      special_total: specialTotal,
+      total_price: orderOriginalTotal,
+      order_original_total: orderOriginalTotal,
       created_at: new Date().toISOString(),
       completed_at: null,
       pricing_snapshot: snapshot,
@@ -482,6 +542,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         action: "create_order",
         menu_item_id: menuItemId,
         assigned_worker_ids: workerIds,
+        special_requirements: normalizedRequirements,
       });
       set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
       return data.created_order_id ?? optimisticId;
@@ -500,48 +561,21 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
 
     /*
-     * 完整财务拆分算法（全部先换算为整数分）：
-     * 1. 可分配总池 = 基础单价 + 打赏。
-     * 2. 俱乐部收入 = 基础单价 × 抽成比例；打赏不参与抽成。
-     * 3. 打手池 = 可分配总池 - 俱乐部收入。
-     * 4. single / equal / tiered 读取下单时已冻结的 payout_weights 分配。
-     * 最大余数法负责分配不足 1 分的尾差，保证每一分钱守恒。
+     * 完整结算公式（calculateSettlement 内部全部按整数分计算）：
+     * 1. 抽成基数 = order_original_total = base_price_snapshot + special_total。
+     * 2. uniform：俱乐部抽成 = 抽成基数 × 统一抽成率（双人也只抽一次）。
+     *    by_tier：俱乐部抽成 = Σ(抽成基数 × 每名打手冻结档位对应的抽成率)。
+     * 3. 不含打赏的打手池 = 抽成基数 - 俱乐部总抽成。
+     * 4. 最终打手池 = 不含打赏的打手池 + tip；打赏不参与抽成。
+     * 5. single / equal / tiered 按冻结的 payout_weights 分配最终打手池，
+     *    并用最大余数法处理尾差，保证俱乐部 + 打手 = 原始总价 + 打赏。
      */
-    const baseCents = toCents(order.pricing_snapshot.base_price);
     const tipCents = toCents(tip);
-    const commissionBps = Math.round(
-      order.pricing_snapshot.club_commission_rate * 100,
+    const settlement = calculateSettlement(
+      order.pricing_snapshot,
+      fromCents(tipCents),
+      order.order_original_total,
     );
-    const totalPoolCents = baseCents + tipCents;
-    const clubIncomeCents = Math.round((baseCents * commissionBps) / 10_000);
-    const workerPoolCents = totalPoolCents - clubIncomeCents;
-    const weighted = order.pricing_snapshot.payout_weights.map((entry, index) => {
-      const numerator = workerPoolCents * Math.round(entry.weight * 100);
-      return {
-        workerId: entry.workerId,
-        index,
-        cents: Math.floor(numerator / 10_000),
-        remainder: numerator % 10_000,
-      };
-    });
-    if (!weighted.length) throw new Error("订单没有可结算的打手");
-    let remaining =
-      workerPoolCents - weighted.reduce((sum, entry) => sum + entry.cents, 0);
-    const remainderOrder = [...weighted].sort(
-      (a, b) => b.remainder - a.remainder || a.index - b.index,
-    );
-    for (let index = 0; remaining > 0; index += 1, remaining -= 1) {
-      remainderOrder[index % remainderOrder.length].cents += 1;
-    }
-    const settlement: SettlementResult = {
-      total_pool: fromCents(totalPoolCents),
-      club_income: fromCents(clubIncomeCents),
-      worker_pool: fromCents(workerPoolCents),
-      worker_incomes: weighted.map((entry) => ({
-        workerId: entry.workerId,
-        amount: fromCents(entry.cents),
-      })),
-    };
 
     const completedAt = new Date().toISOString();
     const previous = { workers: state.workers, menu: state.menu, orders: state.orders };

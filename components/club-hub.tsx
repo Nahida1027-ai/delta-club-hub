@@ -12,6 +12,7 @@ import {
 import {
   BarChart3,
   Check,
+  ChevronDown,
   ChevronRight,
   CircleDollarSign,
   Clock3,
@@ -48,6 +49,8 @@ import {
 import { toast } from "sonner";
 import { AddServiceModal } from "@/components/Modals/AddServiceModal";
 import { AddWorkerModal } from "@/components/Modals/AddWorkerModal";
+import { EditServiceModal } from "@/components/Modals/EditServiceModal";
+import { OrderConfirmModal } from "@/components/Modals/OrderConfirmModal";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -61,7 +64,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -91,16 +93,10 @@ import type {
   Order,
   PriceMenuItem,
   SettlementResult,
-  SplitType,
   Worker,
   WorkerTier,
 } from "@/lib/club-types";
-import {
-  buildPayoutWeights,
-  calculateSettlement,
-  splitLabel,
-  validateMenuRule,
-} from "@/lib/settlement";
+import { calculateSettlement, splitLabel } from "@/lib/settlement";
 import { useClubStore } from "@/store/use-club-store";
 import { useClubWebMcp } from "@/hooks/use-club-webmcp";
 
@@ -469,7 +465,16 @@ function TierBadge({ tier }: { tier: WorkerTier }) {
 function ServiceRule({ item }: { item: PriceMenuItem }) {
   return (
     <div className="flex flex-wrap items-center gap-2 text-[13px]">
-      <span className="rounded-lg bg-white/[0.055] px-2.5 py-1 text-white/55">抽成 {item.club_commission_rate}%</span>
+      {item.commission_mode === "by_tier" ? (
+        <>
+          <span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 text-[#64D2FF]">按档位抽成</span>
+          <span className="rounded-lg bg-white/[0.055] px-2.5 py-1 text-white/55">
+            1档 {item.tier_commission_rates["1档"]}% · 2档 {item.tier_commission_rates["2档"]}% · 3档 {item.tier_commission_rates["3档"]}%
+          </span>
+        </>
+      ) : (
+        <span className="rounded-lg bg-white/[0.055] px-2.5 py-1 text-white/55">统一抽成 {item.club_commission_rate}%</span>
+      )}
       <span className="rounded-lg bg-white/[0.055] px-2.5 py-1 text-white/55">{splitLabel(item.split_type)}</span>
       {item.split_type === "tiered" && item.tiered_ratios ? (
         <span className="rounded-lg bg-[#5E5CE6]/12 px-2.5 py-1 text-[#A5A4FF]">
@@ -489,12 +494,14 @@ function OrderDesk({
   workers: Worker[];
   orders: Order[];
 }) {
-  const createOrder = useClubStore((state) => state.createOrder);
   const isMutating = useClubStore((state) => state.is_mutating);
-  const [assigning, setAssigning] = useState<PriceMenuItem | null>(null);
+  const [confirmation, setConfirmation] = useState<{
+    item: PriceMenuItem;
+    initialWorkerIds: string[];
+  } | null>(null);
   const activeOrders = orders.filter((order) => order.status === "active");
 
-  async function autoAssign(item: PriceMenuItem) {
+  function autoAssign(item: PriceMenuItem) {
     const recommended = workers.find(
       (worker) => worker.status === "idle" && item.eligible_tiers.includes(worker.tier),
     );
@@ -502,12 +509,7 @@ function OrderDesk({
       toast.error("暂无匹配的空闲打手");
       return;
     }
-    try {
-      const orderId = await createOrder(item.id, [recommended.id]);
-      toast.success(`订单 ${orderId.slice(0, 8)} 已派给 ${recommended.name}`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "派单失败");
-    }
+    setConfirmation({ item, initialWorkerIds: [recommended.id] });
   }
 
   return (
@@ -543,12 +545,12 @@ function OrderDesk({
                       <Button disabled={!available || isMutating} onClick={() => autoAssign(item)} className="h-11 flex-1 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]">
                         <Zap className="size-4" />自动派单
                       </Button>
-                      <Button disabled={!available || isMutating} variant="outline" onClick={() => setAssigning(item)} className="h-11 rounded-xl border-white/10 bg-white/[0.045] text-white hover:bg-white/10 hover:text-white">
+                      <Button disabled={!available || isMutating} variant="outline" onClick={() => setConfirmation({ item, initialWorkerIds: [] })} className="h-11 rounded-xl border-white/10 bg-white/[0.045] text-white hover:bg-white/10 hover:text-white">
                         手动选择
                       </Button>
                     </>
                   ) : (
-                    <Button disabled={available < 2 || isMutating} onClick={() => setAssigning(item)} className="h-11 w-full rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]">
+                    <Button disabled={available < 2 || isMutating} onClick={() => setConfirmation({ item, initialWorkerIds: [] })} className="h-11 w-full rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]">
                       选择 2 名打手<ChevronRight className="size-4" />
                     </Button>
                   )}
@@ -576,7 +578,19 @@ function OrderDesk({
               <div key={order.id} className="grid gap-3 px-5 py-4 sm:grid-cols-[1fr_auto_auto] sm:items-center sm:px-6">
                 <div>
                   <p className="font-medium text-white">{order.pricing_snapshot.service_name}</p>
-                  <p className="mt-1 text-sm text-white/38">#{order.id.slice(0, 8)} · {formatDateTime(order.created_at)}</p>
+                  <p className="mt-1 text-sm text-white/38">
+                    #{order.id.slice(0, 8)} · {formatDateTime(order.created_at)} · {formatMoney(order.total_price)}
+                  </p>
+                  {order.special_requirements.length ? (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      <Badge className="border-[#5E5CE6]/20 bg-[#5E5CE6]/10 text-[#C4C3FF]">
+                        特殊需求 × {order.special_requirements.length}
+                      </Badge>
+                      <Badge className="border-[#007AFF]/20 bg-[#007AFF]/10 text-[#64D2FF]">
+                        +{formatMoney(order.special_total)}
+                      </Badge>
+                    </div>
+                  ) : null}
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {order.assigned_worker_ids.map((id) => <Badge key={id} className="border-white/10 bg-white/[0.055] text-white/65">{workerName(workers, id, order)}</Badge>)}
@@ -590,121 +604,15 @@ function OrderDesk({
         )}
       </article>
 
-      <AssignmentDialog key={assigning?.id ?? "closed"} item={assigning} workers={workers} open={Boolean(assigning)} onOpenChange={(open) => !open && setAssigning(null)} />
+      <OrderConfirmModal
+        key={confirmation ? `${confirmation.item.id}:${confirmation.initialWorkerIds.join(",")}` : "closed"}
+        item={confirmation?.item ?? null}
+        workers={workers}
+        initialWorkerIds={confirmation?.initialWorkerIds ?? []}
+        open={Boolean(confirmation)}
+        onOpenChange={(open) => !open && setConfirmation(null)}
+      />
     </div>
-  );
-}
-
-function AssignmentDialog({
-  item,
-  workers,
-  open,
-  onOpenChange,
-}: {
-  item: PriceMenuItem | null;
-  workers: Worker[];
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const createOrder = useClubStore((state) => state.createOrder);
-  const isMutating = useClubStore((state) => state.is_mutating);
-  const available = useMemo(
-    () =>
-      item
-        ? workers.filter(
-            (worker) => worker.status === "idle" && item.eligible_tiers.includes(worker.tier),
-          )
-        : [],
-    [item, workers],
-  );
-  const [selected, setSelected] = useState<string[]>(() =>
-    item?.split_type === "single" && available[0] ? [available[0].id] : [],
-  );
-
-  if (!item) return null;
-  const needed = item.split_type === "single" ? 1 : 2;
-  const selectedWorkers = available.filter((worker) => selected.includes(worker.id));
-  let validationMessage = "";
-  let preview: SettlementResult | null = null;
-  try {
-    if (selected.length !== needed) throw new Error(`请选择 ${needed} 名打手`);
-    const weights = buildPayoutWeights(item.split_type, selectedWorkers, item.tiered_ratios);
-    preview = calculateSettlement(
-      {
-        service_name: item.service_name,
-        base_price: item.base_price,
-        club_commission_rate: item.club_commission_rate,
-        split_type: item.split_type,
-        tiered_ratios: item.tiered_ratios,
-        payout_weights: weights,
-      },
-      0,
-    );
-  } catch (error) {
-    validationMessage = error instanceof Error ? error.message : "选择不符合规则";
-  }
-
-  function toggle(id: string) {
-    setSelected((current) => {
-      if (current.includes(id)) return current.filter((candidate) => candidate !== id);
-      if (current.length >= needed) return item!.split_type === "single" ? [id] : current;
-      return [...current, id];
-    });
-  }
-
-  async function confirm() {
-    if (!preview) return;
-    try {
-      const orderId = await createOrder(item!.id, selected);
-      toast.success(`订单 ${orderId.slice(0, 8)} 分配成功`);
-      onOpenChange(false);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "分配失败");
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] overflow-y-auto border-white/10 bg-[#171719]/95 text-white shadow-2xl backdrop-blur-xl sm:max-w-xl">
-        <DialogHeader>
-          <DialogTitle className="text-xl">分配打手</DialogTitle>
-          <DialogDescription className="text-white/45">{item.service_name} · {splitLabel(item.split_type)} · 已选 {selected.length}/{needed}</DialogDescription>
-        </DialogHeader>
-        {item.split_type === "tiered" ? (
-          <div className="rounded-xl border border-[#5E5CE6]/20 bg-[#5E5CE6]/10 px-4 py-3 text-sm leading-6 text-[#C4C3FF]">需各选 1 名 1档与 1 名 2档打手；3档不参与此模式。</div>
-        ) : null}
-        <div className="grid gap-2 sm:grid-cols-2">
-          {available.map((worker) => {
-            const checked = selected.includes(worker.id);
-            const disabled = !checked && selected.length >= needed;
-            return (
-              <label key={worker.id} className={`flex min-h-16 cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 transition ${checked ? "border-[#007AFF]/55 bg-[#007AFF]/12" : "border-white/[0.08] bg-white/[0.035] hover:bg-white/[0.06]"} ${disabled ? "cursor-not-allowed opacity-40" : ""}`}>
-                <Checkbox checked={checked} disabled={disabled} onCheckedChange={() => toggle(worker.id)} className="border-white/20 data-[state=checked]:border-[#007AFF] data-[state=checked]:bg-[#007AFF]" />
-                <span className="min-w-0 flex-1">
-                  <span className="block font-medium text-white">{worker.name}</span>
-                  <span className="mt-1 block text-sm text-white/40">累计 {worker.total_completed_orders} 单</span>
-                </span>
-                <TierBadge tier={worker.tier} />
-              </label>
-            );
-          })}
-        </div>
-        {!available.length ? <p className="rounded-xl border border-[#FF453A]/20 bg-[#FF453A]/10 p-4 text-sm text-[#FF6961]">没有符合档位规则的空闲打手。</p> : null}
-        <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-4">
-          <div className="flex items-center justify-between text-sm"><span className="text-white/45">基础单价</span><span className="font-medium">{formatMoney(item.base_price)}</span></div>
-          <div className="mt-2 flex items-center justify-between text-sm"><span className="text-white/45">俱乐部抽成</span><span className="font-medium text-[#64D2FF]">{preview ? formatMoney(preview.club_income) : "—"}</span></div>
-          <div className="mt-2 flex items-center justify-between text-sm"><span className="text-white/45">打手分配池</span><span className="font-medium text-[#5FE778]">{preview ? formatMoney(preview.worker_pool) : "—"}</span></div>
-          {preview?.worker_incomes.map((income) => (
-            <div key={income.workerId} className="mt-2 flex items-center justify-between border-t border-white/[0.06] pt-2 text-sm"><span className="text-white/45">{workerName(workers, income.workerId)}</span><span>{formatMoney(income.amount)}</span></div>
-          ))}
-        </div>
-        {validationMessage ? <p className="text-sm text-[#FF6961]">{validationMessage}</p> : null}
-        <DialogFooter>
-          <Button variant="ghost" className="h-11 rounded-xl text-white/60 hover:bg-white/[0.06] hover:text-white" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button className="h-11 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]" disabled={!preview || isMutating} onClick={confirm}>{isMutating ? "正在锁定…" : "确认分配"}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 
@@ -852,6 +760,16 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                       <div className="rounded-xl border border-[#FF453A]/15 bg-[#FF453A]/[0.055] p-3">
                         <p className="truncate text-sm font-medium text-white/85">{activeOrder.pricing_snapshot.service_name}</p>
                         <p className="mt-1 text-[12px] text-white/35">订单 #{activeOrder.id.slice(0, 8)}</p>
+                        {activeOrder.special_requirements.length ? (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            <span className="rounded-md bg-[#5E5CE6]/15 px-2 py-1 text-[11px] text-[#C4C3FF]">
+                              特殊需求 × {activeOrder.special_requirements.length}
+                            </span>
+                            <span className="rounded-md bg-[#007AFF]/15 px-2 py-1 text-[11px] text-[#64D2FF]">
+                              +{formatMoney(activeOrder.special_total)}
+                            </span>
+                          </div>
+                        ) : null}
                       </div>
                       <div className="mt-3 grid grid-cols-2 gap-2">
                         <Button onClick={() => setFinishing(activeOrder)} disabled={isMutating} className="h-11 rounded-xl bg-white text-[#1C1C1E] hover:bg-white/90">
@@ -1055,7 +973,7 @@ function FinishOrderDialog({
     if (tipInput.trim() === "" || !/^\d+(\.\d{0,2})?$/.test(tipInput) || tip < 0) {
       throw new Error("打赏金额需为非负数字，最多两位小数");
     }
-    preview = calculateSettlement(order.pricing_snapshot, tip);
+    preview = calculateSettlement(order.pricing_snapshot, tip, order.order_original_total);
   } catch (error) {
     errorMessage = error instanceof Error ? error.message : "金额无效";
   }
@@ -1087,8 +1005,9 @@ function FinishOrderDialog({
           <p className="mt-2 text-[13px] text-[#64D2FF]">打赏不参与抽成，100% 进入打手分配池。</p>
         </div>
         <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-black/20">
-          <div className="grid grid-cols-3 divide-x divide-white/[0.07] border-b border-white/[0.07]">
-            <div className="p-3 text-center"><p className="text-[12px] text-white/35">基础价</p><p className="mt-1 text-sm font-semibold">{formatMoney(order.pricing_snapshot.base_price)}</p></div>
+          <div className="grid grid-cols-2 divide-x divide-y divide-white/[0.07] border-b border-white/[0.07] sm:grid-cols-4 sm:divide-y-0">
+            <div className="p-3 text-center"><p className="text-[12px] text-white/35">订单原价</p><p className="mt-1 text-sm font-semibold">{formatMoney(order.order_original_total)}</p></div>
+            <div className="p-3 text-center"><p className="text-[12px] text-white/35">特殊加价</p><p className="mt-1 text-sm font-semibold text-[#C4C3FF]">+{formatMoney(order.special_total)}</p></div>
             <div className="p-3 text-center"><p className="text-[12px] text-white/35">俱乐部</p><p className="mt-1 text-sm font-semibold text-[#64D2FF]">{preview ? formatMoney(preview.club_income) : "—"}</p></div>
             <div className="p-3 text-center"><p className="text-[12px] text-white/35">打手池</p><p className="mt-1 text-sm font-semibold text-[#5FE778]">{preview ? formatMoney(preview.worker_pool) : "—"}</p></div>
           </div>
@@ -1161,7 +1080,18 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
               >
                 <TableCell className="px-5 py-5 font-medium text-white sm:px-6">{item.service_name}</TableCell>
                 <TableCell className="font-semibold text-white">{formatMoney(item.base_price)}</TableCell>
-                <TableCell><span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 font-medium text-[#64D2FF]">{item.club_commission_rate}%</span></TableCell>
+                <TableCell>
+                  {item.commission_mode === "by_tier" ? (
+                    <div>
+                      <span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 font-medium text-[#64D2FF]">按档位</span>
+                      <p className="mt-2 whitespace-nowrap text-[12px] text-white/38">
+                        1档 {item.tier_commission_rates["1档"]}% / 2档 {item.tier_commission_rates["2档"]}% / 3档 {item.tier_commission_rates["3档"]}%
+                      </p>
+                    </div>
+                  ) : (
+                    <span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 font-medium text-[#64D2FF]">统一 {item.club_commission_rate}%</span>
+                  )}
+                </TableCell>
                 <TableCell>
                   <div>
                     <span className="text-white/70">{splitLabel(item.split_type)}</span>
@@ -1179,8 +1109,8 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
         </Table>
       </article>
       <div className="grid gap-4 md:grid-cols-3">
-        <RuleNote icon={LockKeyhole} title="订单规则快照" text="创建订单时冻结价格、抽成、模式和权重；旧单永远不被新规则改写。" />
-        <RuleNote icon={Coins} title="打赏免抽成" text="俱乐部只按基础单价抽成，打赏金额完整进入打手分配池。" />
+        <RuleNote icon={LockKeyhole} title="订单规则快照" text="创建订单时冻结价格、档位抽成、模式和权重；旧单永远不被新规则改写。" />
+        <RuleNote icon={Coins} title="加价参与抽成" text="基础价与特殊需求加价共同参与抽成；打赏仍完整进入打手分配池。" />
         <RuleNote icon={ShieldCheck} title="金额守恒" text="按整数分结算并自动处理尾差，所有收入相加始终等于订单总额。" />
       </div>
       <AddServiceModal
@@ -1188,7 +1118,7 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
         open={adding}
         onOpenChange={setAdding}
       />
-      <PriceEditDialog key={editing?.id ?? "closed"} item={editing} open={Boolean(editing)} onOpenChange={(open) => !open && setEditing(null)} />
+      <EditServiceModal key={editing?.id ?? "closed"} item={editing} open={Boolean(editing)} onOpenChange={(open) => !open && setEditing(null)} />
     </div>
   );
 }
@@ -1202,131 +1132,129 @@ function RuleNote({ icon: Icon, title, text }: { icon: React.ComponentType<{ cla
   );
 }
 
-function PriceEditDialog({ item, open, onOpenChange }: { item: PriceMenuItem | null; open: boolean; onOpenChange: (open: boolean) => void }) {
-  const updateMenuItem = useClubStore((state) => state.updateMenuItem);
-  const isMutating = useClubStore((state) => state.is_mutating);
-  const [draft, setDraft] = useState<PriceMenuItem | null>(() =>
-    item
-      ? {
-          ...item,
-          eligible_tiers: [...item.eligible_tiers],
-          tiered_ratios: item.tiered_ratios ? { ...item.tiered_ratios } : null,
-        }
-      : null,
-  );
-  if (!draft) return null;
-
-  let validationMessage = "";
-  let preview: SettlementResult | null = null;
-  try {
-    validateMenuRule(draft);
-    const demoWorkers: Worker[] = draft.split_type === "single"
-      ? [{ id: "demo-1", name: "示例打手", tier: draft.eligible_tiers[0] ?? "1档", status: "idle", total_completed_orders: 0 }]
-      : draft.split_type === "tiered"
-        ? [
-            { id: "demo-1", name: "1档打手", tier: "1档", status: "idle", total_completed_orders: 0 },
-            { id: "demo-2", name: "2档打手", tier: "2档", status: "idle", total_completed_orders: 0 },
-          ]
-        : [
-            { id: "demo-1", name: "打手 A", tier: draft.eligible_tiers[0] ?? "1档", status: "idle", total_completed_orders: 0 },
-            { id: "demo-2", name: "打手 B", tier: draft.eligible_tiers[0] ?? "1档", status: "idle", total_completed_orders: 0 },
-          ];
-    preview = calculateSettlement(
-      {
-        service_name: draft.service_name,
-        base_price: draft.base_price,
-        club_commission_rate: draft.club_commission_rate,
-        split_type: draft.split_type,
-        tiered_ratios: draft.tiered_ratios,
-        payout_weights: buildPayoutWeights(draft.split_type, demoWorkers, draft.tiered_ratios),
-      },
-      0,
-    );
-  } catch (error) {
-    validationMessage = error instanceof Error ? error.message : "规则无效";
-  }
-
-  function updateSplit(splitType: SplitType) {
-    setDraft((current) => current ? {
-      ...current,
-      split_type: splitType,
-      tiered_ratios: splitType === "tiered" ? current.tiered_ratios ?? { "1档": 60, "2档": 40 } : null,
-      eligible_tiers: splitType === "tiered" ? ["1档", "2档"] : current.eligible_tiers.length ? current.eligible_tiers : tiers,
-    } : current);
-  }
-
-  function toggleTier(tier: WorkerTier) {
-    if (draft!.split_type === "tiered") return;
-    setDraft((current) => current ? {
-      ...current,
-      eligible_tiers: current.eligible_tiers.includes(tier)
-        ? current.eligible_tiers.filter((candidate) => candidate !== tier)
-        : [...current.eligible_tiers, tier],
-    } : current);
-  }
-
-  async function save() {
-    if (!preview) return;
-    try {
-      await updateMenuItem(draft!);
-      toast.success("结算规则已保存，仅作用于后续新订单");
-      onOpenChange(false);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "保存失败");
-    }
-  }
+function OrderHistoryItem({
+  order,
+  workers,
+  isMutating,
+  onDelete,
+}: {
+  order: Order;
+  workers: Worker[];
+  isMutating: boolean;
+  onDelete: (order: Order) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const commissionText = order.pricing_snapshot.commission_mode === "by_tier"
+    ? `档位抽成 1档 ${order.pricing_snapshot.tier_commission_rates["1档"]}% / 2档 ${order.pricing_snapshot.tier_commission_rates["2档"]}% / 3档 ${order.pricing_snapshot.tier_commission_rates["3档"]}%`
+    : `统一抽成 ${order.pricing_snapshot.club_commission_rate}%`;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto border-white/10 bg-[#171719]/95 text-white shadow-2xl backdrop-blur-xl sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle className="text-xl">编辑结算规则</DialogTitle>
-          <DialogDescription className="text-white/45">已创建订单保留原规则快照，不会被本次修改影响。</DialogDescription>
-        </DialogHeader>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <label className="space-y-2 sm:col-span-2"><span className="text-sm font-medium text-white/65">服务名称</span><Input value={draft.service_name} onChange={(event) => setDraft({ ...draft, service_name: event.target.value })} className={inputClass} /></label>
-          <label className="space-y-2"><span className="text-sm font-medium text-white/65">基础单价（元）</span><Input type="number" min="0" step="0.01" value={draft.base_price} onChange={(event) => setDraft({ ...draft, base_price: Number(event.target.value) })} className={inputClass} /></label>
-          <label className="space-y-2"><span className="flex items-center justify-between text-sm font-medium text-white/65"><span>俱乐部抽成（%）</span><span className="text-[#64D2FF]">打赏免抽成</span></span><Input type="number" min="0" max="100" step="0.01" value={draft.club_commission_rate} onChange={(event) => setDraft({ ...draft, club_commission_rate: Number(event.target.value) })} className={inputClass} /></label>
-          <label className="space-y-2 sm:col-span-2"><span className="text-sm font-medium text-white/65">分配模式</span>
-            <Select value={draft.split_type} onValueChange={(value) => updateSplit(value as SplitType)}>
-              <SelectTrigger className={`${inputClass} w-full`}><SelectValue /></SelectTrigger>
-              <SelectContent className="border-white/10 bg-[#242426] text-white">
-                <SelectItem value="single">单人全吃 · 1 名打手</SelectItem>
-                <SelectItem value="equal">两人平分 · 各 50%</SelectItem>
-                <SelectItem value="tiered">按档位分 · 1档 + 2档</SelectItem>
-              </SelectContent>
-            </Select>
-          </label>
-          {draft.split_type === "tiered" ? (
-            <div className="grid gap-4 rounded-2xl border border-[#5E5CE6]/20 bg-[#5E5CE6]/[0.07] p-4 sm:col-span-2 sm:grid-cols-2">
-              <label className="space-y-2"><span className="text-sm font-medium text-[#C4C3FF]">1档打手占比（%）</span><Input type="number" min="1" max="99" value={draft.tiered_ratios?.["1档"] ?? 0} onChange={(event) => setDraft({ ...draft, tiered_ratios: { "1档": Number(event.target.value), "2档": draft.tiered_ratios?.["2档"] ?? 0 } })} className={inputClass} /></label>
-              <label className="space-y-2"><span className="text-sm font-medium text-[#C4C3FF]">2档打手占比（%）</span><Input type="number" min="1" max="99" value={draft.tiered_ratios?.["2档"] ?? 0} onChange={(event) => setDraft({ ...draft, tiered_ratios: { "1档": draft.tiered_ratios?.["1档"] ?? 0, "2档": Number(event.target.value) } })} className={inputClass} /></label>
-              <p className={`text-sm sm:col-span-2 ${Math.abs((draft.tiered_ratios?.["1档"] ?? 0) + (draft.tiered_ratios?.["2档"] ?? 0) - 100) < 0.001 ? "text-[#5FE778]" : "text-[#FF6961]"}`}>当前合计 {(draft.tiered_ratios?.["1档"] ?? 0) + (draft.tiered_ratios?.["2档"] ?? 0)}%，必须等于 100%。</p>
-            </div>
-          ) : (
-            <fieldset className="sm:col-span-2"><legend className="mb-2 text-sm font-medium text-white/65">可接档位</legend><div className="flex flex-wrap gap-2">{tiers.map((tier) => { const checked = draft.eligible_tiers.includes(tier); return <label key={tier} className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm ${checked ? "border-[#007AFF]/50 bg-[#007AFF]/12 text-white" : "border-white/10 bg-white/[0.035] text-white/45"}`}><Checkbox checked={checked} onCheckedChange={() => toggleTier(tier)} className="border-white/20 data-[state=checked]:border-[#007AFF] data-[state=checked]:bg-[#007AFF]" />{tier}</label>; })}</div></fieldset>
-          )}
+    <motion.tr
+      layout
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 72, scale: 0.98 }}
+      transition={{ duration: 0.24, ease: "easeOut" }}
+      className="border-b border-white/[0.06] align-top transition-colors hover:bg-white/[0.025]"
+    >
+      <TableCell className="px-5 py-4 sm:px-6">
+        <p className="font-mono text-[13px] text-white/65">#{order.id.slice(0, 8)}</p>
+        <p className="mt-1 text-[12px] text-white/32">{formatDateTime(order.completed_at)}</p>
+      </TableCell>
+      <TableCell className="min-w-72 py-4">
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+          className="group w-full rounded-xl text-left outline-none focus-visible:ring-2 focus-visible:ring-[#007AFF]/60"
+        >
+          <span className="flex items-start justify-between gap-3">
+            <span>
+              <span className="block font-medium text-white">{order.pricing_snapshot.service_name}</span>
+              <span className="mt-1 block text-[12px] text-white/35">
+                {formatMoney(order.total_price)} · {commissionText} · {splitLabel(order.pricing_snapshot.split_type)}
+              </span>
+            </span>
+            <span className="mt-0.5 flex shrink-0 items-center gap-1 text-xs text-[#64D2FF]">
+              {expanded ? "收起" : "明细"}
+              <motion.span animate={{ rotate: expanded ? 180 : 0 }}>
+                <ChevronDown className="size-3.5" />
+              </motion.span>
+            </span>
+          </span>
+        </button>
+        <AnimatePresence initial={false}>
+          {expanded ? (
+            <motion.div
+              initial={{ opacity: 0, height: 0, y: -6 }}
+              animate={{ opacity: 1, height: "auto", y: 0 }}
+              exit={{ opacity: 0, height: 0, y: -6 }}
+              transition={{ duration: 0.22, ease: "easeOut" }}
+              className="overflow-hidden"
+            >
+              <div className="mt-3 rounded-xl border border-white/[0.07] bg-black/20 p-3 text-xs">
+                <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-white/48">
+                  <span>基础价格</span><span className="text-right text-white/75">{formatMoney(order.base_price_snapshot)}</span>
+                  <span>特殊需求加价</span><span className="text-right text-[#C4C3FF]">+{formatMoney(order.special_total)}</span>
+                  <span>订单总价</span><span className="text-right font-medium text-white">{formatMoney(order.total_price)}</span>
+                  <span>打赏</span><span className="text-right text-[#FFB65C]">+{formatMoney(order.tip)}</span>
+                  <span>俱乐部实得</span><span className="text-right text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</span>
+                </div>
+                <div className="mt-3 border-t border-white/[0.06] pt-3">
+                  <p className="mb-2 text-white/40">特殊需求明细</p>
+                  {order.special_requirements.length ? (
+                    <div className="space-y-1.5">
+                      {order.special_requirements.map((requirement, index) => (
+                        <div key={`${requirement.name}-${index}`} className="flex justify-between gap-3 text-white/65">
+                          <span className="truncate">{requirement.name}</span>
+                          <span className="shrink-0">+{formatMoney(requirement.price)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-white/28">无特殊需求</p>
+                  )}
+                </div>
+                <div className="mt-3 border-t border-white/[0.06] pt-3">
+                  <p className="mb-2 text-white/40">打手实得</p>
+                  <div className="space-y-1.5">
+                    {order.final_worker_incomes.map((income) => (
+                      <div key={income.workerId} className="flex justify-between gap-3 text-white/65">
+                        <span>{workerName(workers, income.workerId, order)}</span>
+                        <span className="font-medium text-[#5FE778]">{formatMoney(income.amount)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+      </TableCell>
+      <TableCell className="py-4">
+        <div className="space-y-1">
+          {order.final_worker_incomes.map((income) => (
+            <p key={income.workerId} className="text-sm text-white/65">
+              {workerName(workers, income.workerId, order)} <span className="font-medium text-white">{formatMoney(income.amount)}</span>
+            </p>
+          ))}
         </div>
-        <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-4">
-          <div className="mb-3 flex items-center gap-2 text-sm font-medium text-white/65"><CircleDollarSign className="size-4 text-[#64D2FF]" />零打赏结算预览</div>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <PreviewCell label="订单总额" value={preview?.total_pool} />
-            <PreviewCell label="俱乐部" value={preview?.club_income} tone="blue" />
-            {preview?.worker_incomes.map((income, index) => <PreviewCell key={income.workerId} label={`打手 ${index + 1}`} value={income.amount} tone="green" />)}
-          </div>
-        </div>
-        {validationMessage ? <p className="text-sm text-[#FF6961]">{validationMessage}</p> : null}
-        <DialogFooter>
-          <Button variant="ghost" className="h-11 rounded-xl text-white/60 hover:bg-white/[0.06] hover:text-white" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button className="h-11 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]" disabled={!preview || isMutating} onClick={save}>{isMutating ? "正在保存…" : "保存规则"}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      </TableCell>
+      <TableCell className="py-4 text-right text-white/65">{formatMoney(order.tip)}</TableCell>
+      <TableCell className="py-4 text-right font-semibold text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</TableCell>
+      <TableCell className="py-4 pr-5 text-right sm:pr-6">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={isMutating}
+          onClick={() => onDelete(order)}
+          className={`h-9 rounded-xl ${dangerButtonClass}`}
+        >
+          <Trash2 className="size-3.5" />删除
+        </Button>
+      </TableCell>
+    </motion.tr>
   );
-}
-
-function PreviewCell({ label, value, tone }: { label: string; value?: number; tone?: "blue" | "green" }) {
-  return <div className="rounded-xl bg-white/[0.04] p-3"><p className="text-[12px] text-white/35">{label}</p><p className={`mt-1 text-sm font-semibold ${tone === "blue" ? "text-[#64D2FF]" : tone === "green" ? "text-[#5FE778]" : "text-white"}`}>{value === undefined ? "—" : formatMoney(value)}</p></div>;
 }
 
 function HistoryPanel({
@@ -1393,32 +1321,13 @@ function HistoryPanel({
             <TableBody>
               <AnimatePresence initial={false} mode="popLayout">
                 {completed.map((order) => (
-                  <motion.tr
-                    layout
+                  <OrderHistoryItem
                     key={order.id}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 72, scale: 0.98 }}
-                    transition={{ duration: 0.24, ease: "easeOut" }}
-                    className="border-b border-white/[0.06] transition-colors hover:bg-white/[0.025]"
-                  >
-                    <TableCell className="px-5 py-4 sm:px-6"><p className="font-mono text-[13px] text-white/65">#{order.id.slice(0, 8)}</p><p className="mt-1 text-[12px] text-white/32">{formatDateTime(order.completed_at)}</p></TableCell>
-                    <TableCell><p className="font-medium text-white">{order.pricing_snapshot.service_name}</p><p className="mt-1 text-[12px] text-white/35">{formatMoney(order.pricing_snapshot.base_price)} · 抽成 {order.pricing_snapshot.club_commission_rate}% · {splitLabel(order.pricing_snapshot.split_type)}</p></TableCell>
-                    <TableCell><div className="space-y-1">{order.final_worker_incomes.map((income) => <p key={income.workerId} className="text-sm text-white/65">{workerName(workers, income.workerId, order)} <span className="font-medium text-white">{formatMoney(income.amount)}</span></p>)}</div></TableCell>
-                    <TableCell className="text-right text-white/65">{formatMoney(order.tip)}</TableCell>
-                    <TableCell className="text-right font-semibold text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</TableCell>
-                    <TableCell className="pr-5 text-right sm:pr-6">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={isMutating}
-                        onClick={() => setDeletingOrder(order)}
-                        className={`h-9 rounded-xl ${dangerButtonClass}`}
-                      >
-                        <Trash2 className="size-3.5" />删除
-                      </Button>
-                    </TableCell>
-                  </motion.tr>
+                    order={order}
+                    workers={workers}
+                    isMutating={isMutating}
+                    onDelete={setDeletingOrder}
+                  />
                 ))}
               </AnimatePresence>
             </TableBody>
