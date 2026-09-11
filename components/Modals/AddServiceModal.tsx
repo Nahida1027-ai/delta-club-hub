@@ -323,7 +323,7 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
                         </Field>
                       );
                     })}
-                    <p className="text-[13px] leading-5 text-[#8FD3FF] sm:col-span-3">双人订单会分别按两名打手的档位计提抽成，最终抽成比例为两档之和。</p>
+                    <p className="text-[13px] leading-5 text-[#8FD3FF] sm:col-span-3">双人订单先平分订单金额，再从每名打手自己的份额中按其档位比例抽成。</p>
                   </div>
                 </motion.div>
               )}

@@ -110,7 +110,7 @@ const cases = [
     expected: { club: 13, workers: [117] },
   },
   {
-    name: "by-tier equal: 两名打手分别按整单金额抽成后平分",
+    name: "by-tier equal: 两名打手分别按自己的半份金额抽成",
     result: calculateSettlement(
       snapshot(100, 0, [worker("A", 50), worker("B", 50)], {
         commissionMode: "by_tier",
@@ -119,10 +119,10 @@ const cases = [
       0,
       130,
     ),
-    expected: { club: 39, workers: [45.5, 45.5] },
+    expected: { club: 19.5, workers: [58.5, 52] },
   },
   {
-    name: "by-tier tiered: 先扣档位抽成再按 60/40 分配",
+    name: "by-tier tiered: 旧档位模式按各自冻结份额独立抽成",
     result: calculateSettlement(
       snapshot(100, 0, [worker("A", 60), worker("B", 40)], {
         commissionMode: "by_tier",
@@ -133,7 +133,7 @@ const cases = [
       0,
       130,
     ),
-    expected: { club: 39, workers: [54.6, 36.4] },
+    expected: { club: 18.2, workers: [70.2, 41.6] },
   },
   {
     name: "by-tier equal: 两名同档打手分别承担该档位抽成",
@@ -149,10 +149,10 @@ const cases = [
       ),
       0,
     ),
-    expected: { club: 30, workers: [35, 35] },
+    expected: { club: 15, workers: [42.5, 42.5] },
   },
   {
-    name: "by-tier 100% 边界: 打赏仍完整进入打手池",
+    name: "by-tier equal: 各自抽成后打赏仍完整平分",
     result: calculateSettlement(
       snapshot(100, 0, [worker("A", 50), worker("B", 50)], {
         commissionMode: "by_tier",
@@ -160,7 +160,18 @@ const cases = [
       }),
       10,
     ),
-    expected: { club: 100, workers: [5, 5] },
+    expected: { club: 50, workers: [35, 25] },
+  },
+  {
+    name: "验收样例: 168 元、1档 25%、2档 20%",
+    result: calculateSettlement(
+      snapshot(168, 0, [worker("A", 50), worker("B", 50)], {
+        commissionMode: "by_tier",
+        tierRates: { "1档": 25, "2档": 20, "3档": 15 },
+      }),
+      0,
+    ),
+    expected: { club: 37.8, workers: [63, 67.2] },
   },
 ];
 
@@ -184,12 +195,12 @@ assert.throws(
     calculateSettlement(
       snapshot(100, 0, [worker("A", 50), worker("B", 50)], {
         commissionMode: "by_tier",
-        tierRates: { "1档": 60, "2档": 50, "3档": 0 },
+        tierRates: { "1档": -1, "2档": 20, "3档": 0 },
       }),
       0,
     ),
-  /档位抽成合计不能超过 100%/,
-  "by-tier: 合计抽成超过 100% 必须拒绝",
+  /俱乐部抽成比例无效/,
+  "by-tier: 负数抽成必须拒绝",
 );
 
 const normalizedRequirements = normalizeSpecialRequirements([

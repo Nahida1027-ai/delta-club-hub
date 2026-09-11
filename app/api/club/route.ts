@@ -50,6 +50,7 @@ interface OrderRow {
   id: string;
   menu_item_id: string;
   assigned_worker_ids_json: string;
+  split_type: SplitType;
   status: "active" | "completed";
   tip_cents: number;
   final_club_income_cents: number | null;
@@ -223,9 +224,9 @@ async function ensureSeeded() {
     db.prepare("INSERT OR IGNORE INTO price_menu (id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("menu-single", "排位代练 · 单排", 20_000, "uniform", 3_000, emptyTierCommissions, "single", null, allTiers, now),
     db.prepare("INSERT OR IGNORE INTO price_menu (id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("menu-equal", "护航双排", 36_000, "uniform", 1_000, emptyTierCommissions, "equal", null, allTiers, now),
     db.prepare("INSERT OR IGNORE INTO price_menu (id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("menu-tiered", "巅峰冲刺 · 档位协作", 50_000, "uniform", 2_000, emptyTierCommissions, "tiered", JSON.stringify({ "1档": 60, "2档": 40 }), tieredTiers, now),
-    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("order-demo-single", "menu-single", JSON.stringify(["worker-hanxing"]), 0, 6_000, JSON.stringify([{ workerId: "worker-hanxing", amount: 140 }]), noSpecialRequirements, 20_000, 0, 20_000, 20_000, JSON.stringify(snapshots.single), chinaMonthDate(2, 20), chinaMonthDate(2, 21)),
-    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("order-demo-equal", "menu-equal", JSON.stringify(["worker-muye", "worker-beichen"]), 4_000, 3_600, JSON.stringify([{ workerId: "worker-muye", amount: 182 }, { workerId: "worker-beichen", amount: 182 }]), noSpecialRequirements, 36_000, 0, 36_000, 36_000, JSON.stringify(snapshots.equal), chinaMonthDate(4, 19), chinaMonthDate(4, 22)),
-    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("order-demo-tiered", "menu-tiered", JSON.stringify(["worker-hanxing", "worker-muye"]), 5_000, 10_000, JSON.stringify([{ workerId: "worker-hanxing", amount: 270 }, { workerId: "worker-muye", amount: 180 }]), noSpecialRequirements, 50_000, 0, 50_000, 50_000, JSON.stringify(snapshots.tiered), chinaMonthDate(7, 20), chinaMonthDate(7, 23)),
+    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("order-demo-single", "menu-single", JSON.stringify(["worker-hanxing"]), "single", 0, 6_000, JSON.stringify([{ workerId: "worker-hanxing", amount: 140 }]), noSpecialRequirements, 20_000, 0, 20_000, 20_000, JSON.stringify(snapshots.single), chinaMonthDate(2, 20), chinaMonthDate(2, 21)),
+    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("order-demo-equal", "menu-equal", JSON.stringify(["worker-muye", "worker-beichen"]), "equal", 4_000, 3_600, JSON.stringify([{ workerId: "worker-muye", amount: 182 }, { workerId: "worker-beichen", amount: 182 }]), noSpecialRequirements, 36_000, 0, 36_000, 36_000, JSON.stringify(snapshots.equal), chinaMonthDate(4, 19), chinaMonthDate(4, 22)),
+    db.prepare("INSERT OR IGNORE INTO orders (id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at) VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind("order-demo-tiered", "menu-tiered", JSON.stringify(["worker-hanxing", "worker-muye"]), "tiered", 5_000, 10_000, JSON.stringify([{ workerId: "worker-hanxing", amount: 270 }, { workerId: "worker-muye", amount: 180 }]), noSpecialRequirements, 50_000, 0, 50_000, 50_000, JSON.stringify(snapshots.tiered), chinaMonthDate(7, 20), chinaMonthDate(7, 23)),
   ]);
 }
 
@@ -234,7 +235,7 @@ async function readClubData(): Promise<ClubData> {
   const [workerResult, menuResult, orderResult] = await Promise.all([
     db.prepare("SELECT id, name, tier, status, total_completed_orders FROM workers ORDER BY tier, name").all<WorkerRow>(),
     db.prepare("SELECT id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu ORDER BY id").all<MenuRow>(),
-    db.prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders ORDER BY created_at DESC").all<OrderRow>(),
+    db.prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders ORDER BY created_at DESC").all<OrderRow>(),
   ]);
 
   const workers: Worker[] = workerResult.results.map((row) => ({ ...row }));
@@ -256,6 +257,7 @@ async function readClubData(): Promise<ClubData> {
       id: row.id,
       menu_item_id: row.menu_item_id,
       assigned_worker_ids: JSON.parse(row.assigned_worker_ids_json),
+      split_type: row.split_type ?? pricingSnapshot.split_type,
       status: row.status,
       tip: fromCents(row.tip_cents),
       final_club_income:
@@ -418,6 +420,34 @@ export async function POST(request: Request) {
       });
     }
 
+    if (action === "delete_menu_item") {
+      const menuItemId = String(payload.menu_item_id ?? "").trim();
+      if (!menuItemId || menuItemId.length > 128) throw new Error("服务 ID 无效");
+
+      // 同一条 DELETE 内再次检查 active 订单，避免校验与删除之间出现竞态。
+      const result = await db
+        .prepare("DELETE FROM price_menu WHERE id = ? AND NOT EXISTS (SELECT 1 FROM orders WHERE status = 'active' AND menu_item_id = ?)")
+        .bind(menuItemId, menuItemId)
+        .run();
+      if (!result.meta.changes) {
+        const [existing, activeOrder] = await Promise.all([
+          db.prepare("SELECT id FROM price_menu WHERE id = ?").bind(menuItemId).first<{ id: string }>(),
+          db.prepare("SELECT id FROM orders WHERE status = 'active' AND menu_item_id = ? LIMIT 1").bind(menuItemId).first<{ id: string }>(),
+        ]);
+        if (activeOrder) {
+          return Response.json(
+            { error: "该服务有正在进行的订单，无法删除，请先完结订单" },
+            { status: 409 },
+          );
+        }
+        if (!existing) throw new Error("未找到该服务项目");
+        throw new Error("服务删除失败，请稍后重试");
+      }
+
+      // 历史订单只保留 menu_item_id 与完整价格快照，不随价格表项目一起删除。
+      return Response.json(await readClubData());
+    }
+
     if (action === "update_worker") {
       const workerId = String(payload.worker_id ?? "");
       const data = (payload.data ?? {}) as Record<string, unknown>;
@@ -448,7 +478,7 @@ export async function POST(request: Request) {
     if (action === "delete_historical_order") {
       const orderId = String(payload.order_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "completed") {
@@ -477,7 +507,7 @@ export async function POST(request: Request) {
       }
 
       const orderResult = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders")
         .all<OrderRow>();
       const relatedOrders = orderResult.results.filter((order) =>
         (JSON.parse(order.assigned_worker_ids_json) as string[]).includes(workerId),
@@ -512,7 +542,7 @@ export async function POST(request: Request) {
       const orderId = String(payload.order_id ?? "");
       const oldWorkerId = String(payload.old_worker_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "active") {
@@ -614,11 +644,12 @@ export async function POST(request: Request) {
       const createdAt = new Date().toISOString();
       const [insertResult, , , deleteResult] = await db.batch([
         db
-          .prepare("INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
+          .prepare("INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
           .bind(
             newOrderId,
             row.menu_item_id,
             JSON.stringify(newAssignedWorkerIds),
+            newSnapshot.split_type,
             JSON.stringify(specialRequirements),
             amounts.basePriceSnapshotCents,
             amounts.specialTotalCents,
@@ -779,16 +810,17 @@ export async function POST(request: Request) {
         tiered_ratios: ratios,
         payout_weights: payoutWeights,
       };
-      // 服务端权威校验本次实际打手组合，阻止双人档位抽成合计超过订单原始总价。
+      // 服务端权威校验本次实际打手组合与冻结后的结算规则。
       calculateSettlement(snapshot, 0, totalPrice);
       const orderId = crypto.randomUUID();
       const createdAt = new Date().toISOString();
       const idleCheck = `SELECT COUNT(*) FROM workers WHERE id IN (${placeholders}) AND status = 'idle'`;
       const [insertResult] = await db.batch([
-        db.prepare(`INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE (${idleCheck}) = ?`).bind(
+        db.prepare(`INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE (${idleCheck}) = ? AND EXISTS (SELECT 1 FROM price_menu WHERE id = ?)`).bind(
           orderId,
           menuItemId,
           JSON.stringify(workerIds),
+          snapshot.split_type,
           JSON.stringify(specialRequirements),
           basePriceSnapshotCents,
           specialTotalCents,
@@ -798,6 +830,7 @@ export async function POST(request: Request) {
           createdAt,
           ...workerIds,
           workerIds.length,
+          menuItemId,
         ),
         db.prepare(`UPDATE workers SET status = 'busy' WHERE id IN (${placeholders}) AND EXISTS (SELECT 1 FROM orders WHERE id = ?)`).bind(...workerIds, orderId),
       ]);
@@ -812,7 +845,7 @@ export async function POST(request: Request) {
       const tip = Number(payload.tip ?? 0);
       toCents(tip);
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "active") {
@@ -822,11 +855,14 @@ export async function POST(request: Request) {
       const snapshot = parsePricingSnapshot(row.pricing_snapshot_json);
       const amounts = orderAmountsFromRow(row, snapshot);
       /*
-       * 权威结算公式（整数分）：
-       * 1. 订单原始总价 = 下单基础价快照 + 特殊需求加价合计，二者全部参与抽成。
-       * 2. uniform 只抽一次；by_tier 对每名打手按快照档位分别以订单原始总价计提后求和。
-       * 3. 打手基础池 = 订单原始总价 - 俱乐部总抽成。
-       * 4. 最终打手池 = 打手基础池 + 打赏；打赏不抽成，按原 split 权重一并分配。
+       * finishOrder 权威公式（整数分）：
+       * 1. 订单总价 = 基础价快照 + 特殊需求加价，两部分都参与抽成。
+       * 2. single：打手实得 = 订单总价 × (1 - 该打手档位抽成率)。
+       * 3. equal：每人先分订单总价的 1/2，再分别扣除自己档位对应的抽成；
+       *    俱乐部实得 = 订单总价 - A 基础实得 - B 基础实得。
+       * 4. 打赏不参与抽成：single 全给一人，equal 平分；旧 tiered 单按冻结权重分配。
+       * 5. 样例：168 元 equal 单，1档 25%、2档 20%，两人各自基数为 84 元，
+       *    实得 63 元和 67.2 元，俱乐部实得 37.8 元。
        */
       const settlement = calculateSettlement(
         snapshot,

@@ -170,6 +170,44 @@ export function buildPayoutWeights(
   }));
 }
 
+function allocateCentsByWeight(totalCents: number, weights: PayoutWeight[]) {
+  const weighted = weights.map((entry, index) => {
+    if (!Number.isFinite(entry.weight) || entry.weight < 0) {
+      throw new Error("打手分配权重无效");
+    }
+    const weightBps = Math.round(entry.weight * 100);
+    if (!Number.isSafeInteger(weightBps)) {
+      throw new Error("打手分配权重超出安全范围");
+    }
+    const numerator = totalCents * weightBps;
+    if (!Number.isSafeInteger(numerator)) {
+      throw new Error("订单分配金额超出安全范围");
+    }
+    return {
+      ...entry,
+      index,
+      weightBps,
+      cents: Math.floor(numerator / 10_000),
+      remainder: numerator % 10_000,
+    };
+  });
+
+  if (weighted.reduce((sum, entry) => sum + entry.weightBps, 0) !== 10_000) {
+    throw new Error("打手分配权重合计必须为 100%");
+  }
+
+  const allocated = weighted.reduce((sum, entry) => sum + entry.cents, 0);
+  let remaining = totalCents - allocated;
+  const remainderOrder = [...weighted].sort(
+    (a, b) => b.remainder - a.remainder || a.index - b.index,
+  );
+  for (let index = 0; remaining > 0; index += 1, remaining -= 1) {
+    remainderOrder[index % remainderOrder.length].cents += 1;
+  }
+
+  return weighted.map((entry) => entry.cents);
+}
+
 export function calculateSettlement(
   snapshot: OrderPricingSnapshot,
   tip: number,
@@ -188,58 +226,55 @@ export function calculateSettlement(
   if (commissionMode !== "uniform" && commissionMode !== "by_tier") {
     throw new Error("订单抽成模式无效");
   }
-  const commissionRates = commissionMode === "by_tier"
-    ? snapshot.payout_weights.map((entry) => getCommissionRate(snapshot, entry.tier))
-    : [getCommissionRate(snapshot, snapshot.payout_weights[0].tier)];
-  const clubIncomeCents = commissionRates.reduce((sum, rate) => {
-    if (!Number.isFinite(rate) || rate < 0) throw new Error("俱乐部抽成比例无效");
+  /*
+   * 财务核心（全部按整数分计算）：
+   * 1. 先按 split 权重拆分订单原始总价；single 为 100%，equal 为 50% / 50%。
+   * 2. 每名打手实得基础收入 = 自己的订单份额 × (1 - 自己档位的抽成率)。
+   * 3. 俱乐部抽成 = 每名打手订单份额对应的抽成之和。
+   * 4. 打赏另行按同一权重分配，不参与任何抽成。
+   *
+   * 168 元 equal 示例：1档 25%、2档 20%。两人的订单份额均为 84 元，
+   * 1档实得 84 × 75% = 63 元，2档实得 84 × 80% = 67.2 元，
+   * 俱乐部实得 168 - 63 - 67.2 = 37.8 元。
+   */
+  const originalShares = allocateCentsByWeight(
+    originalTotalCents,
+    snapshot.payout_weights,
+  );
+  const tipShares = allocateCentsByWeight(tipCents, snapshot.payout_weights);
+
+  let clubIncomeCents = 0;
+  const workerIncomes = snapshot.payout_weights.map((entry, index) => {
+    const rate = getCommissionRate(snapshot, entry.tier);
+    if (!Number.isFinite(rate) || rate < 0) {
+      throw new Error("俱乐部抽成比例无效");
+    }
     const rateBps = Math.round(rate * 100);
-    const numerator = originalTotalCents * rateBps;
-    if (!Number.isSafeInteger(rateBps) || !Number.isSafeInteger(numerator)) {
+    const commissionNumerator = originalShares[index] * rateBps;
+    if (!Number.isSafeInteger(rateBps) || !Number.isSafeInteger(commissionNumerator)) {
       throw new Error("俱乐部抽成比例超出安全范围");
     }
-    return sum + Math.round(numerator / 10_000);
-  }, 0);
-  if (clubIncomeCents > originalTotalCents) {
-    throw new Error("本单所选打手的档位抽成合计不能超过 100%");
-  }
-
-  // 特殊需求与基础价一起参与抽成；打赏在扣完抽成后才加入，因此始终 100% 归打手池。
-  const workerPoolCents = originalTotalCents - clubIncomeCents + tipCents;
-  const weightBpsTotal = snapshot.payout_weights.reduce(
-    (sum, entry) => sum + Math.round(entry.weight * 100),
-    0,
-  );
-  if (weightBpsTotal !== 10_000) throw new Error("打手分配权重合计必须为 100%");
-
-  const weights = snapshot.payout_weights.map((entry, index) => {
-    const weightBps = Math.round(entry.weight * 100);
-    if (!Number.isFinite(entry.weight) || weightBps < 0) {
-      throw new Error("打手分配权重无效");
-    }
-    const numerator = workerPoolCents * weightBps;
+    const commissionCents = Math.round(commissionNumerator / 10_000);
+    clubIncomeCents += commissionCents;
     return {
-      ...entry,
-      index,
-      cents: Math.floor(numerator / 10_000),
-      remainder: numerator % 10_000,
+      workerId: entry.workerId,
+      cents: originalShares[index] - commissionCents + tipShares[index],
     };
   });
-
-  const allocated = weights.reduce((sum, entry) => sum + entry.cents, 0);
-  let remaining = workerPoolCents - allocated;
-  const remainderOrder = [...weights].sort(
-    (a, b) => b.remainder - a.remainder || a.index - b.index,
-  );
-  for (let index = 0; remaining > 0; index += 1, remaining -= 1) {
-    remainderOrder[index % remainderOrder.length].cents += 1;
+  if (!Number.isSafeInteger(clubIncomeCents)) {
+    throw new Error("俱乐部抽成金额超出安全范围");
   }
+
+  const workerPoolCents = workerIncomes.reduce(
+    (sum, entry) => sum + entry.cents,
+    0,
+  );
 
   return {
     total_pool: fromCents(totalPoolCents),
     club_income: fromCents(clubIncomeCents),
     worker_pool: fromCents(workerPoolCents),
-    worker_incomes: weights.map((entry) => ({
+    worker_incomes: workerIncomes.map((entry) => ({
       workerId: entry.workerId,
       amount: fromCents(entry.cents),
     })),

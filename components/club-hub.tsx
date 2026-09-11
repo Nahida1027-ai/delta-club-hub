@@ -516,15 +516,18 @@ function OrderDesk({
     <div className="space-y-8">
       <SectionTitle eyebrow="ORDER DESK" title="老板点单" detail="服务规则在下单瞬间冻结，后续调价不会改变这张订单。" />
       <div className="grid gap-4 lg:grid-cols-3">
-        {menu.map((item, index) => {
+        <AnimatePresence initial={false} mode="popLayout">
+          {menu.map((item, index) => {
           const available = workers.filter(
             (worker) => worker.status === "idle" && item.eligible_tiers.includes(worker.tier),
           ).length;
           return (
             <motion.article
+              layout
               key={item.id}
               initial={{ opacity: 0, y: 14 }}
               animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, x: -48, scale: 0.98 }}
               transition={{ delay: index * 0.05 }}
               className={`${glassCard} group relative overflow-hidden p-5 sm:p-6`}
             >
@@ -561,7 +564,8 @@ function OrderDesk({
               </div>
             </motion.article>
           );
-        })}
+          })}
+        </AnimatePresence>
       </div>
 
       <article className={`${glassCard} overflow-hidden`}>
@@ -1036,7 +1040,22 @@ function FinishOrderDialog({
 function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<PriceMenuItem | null>(null);
+  const [deleting, setDeleting] = useState<PriceMenuItem | null>(null);
+  const deleteMenuItem = useClubStore((state) => state.deleteMenuItem);
   const isMutating = useClubStore((state) => state.is_mutating);
+
+  async function confirmDeleteMenuItem() {
+    if (!deleting) return;
+    try {
+      const serviceName = deleting.service_name;
+      await deleteMenuItem(deleting.id);
+      toast.success(`${serviceName} 已删除，历史订单保持不变`);
+      setDeleting(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除服务失败");
+    }
+  }
+
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -1074,7 +1093,7 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
                 key={item.id}
                 initial={{ opacity: 0, x: 56 }}
                 animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: 56 }}
+                exit={{ opacity: 0, x: -56 }}
                 transition={{ type: "spring", stiffness: 260, damping: 26 }}
                 className="border-b border-white/[0.06] transition-colors hover:bg-white/[0.025]"
               >
@@ -1100,7 +1119,10 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
                 </TableCell>
                 <TableCell><div className="flex gap-1">{item.eligible_tiers.map((tier) => <TierBadge key={tier} tier={tier} />)}</div></TableCell>
                 <TableCell className="pr-5 text-right sm:pr-6">
-                  <Button variant="outline" size="sm" disabled={isMutating} onClick={() => setEditing(item)} className="rounded-lg border-white/10 bg-white/[0.045] text-white/70 hover:bg-white/10 hover:text-white"><PencilLine className="size-3.5" />编辑规则</Button>
+                  <div className="flex justify-end gap-2">
+                    <Button variant="outline" size="sm" disabled={isMutating} onClick={() => setEditing(item)} className="rounded-lg border-[#007AFF]/25 bg-[#007AFF]/10 text-[#64D2FF] hover:bg-[#007AFF]/20 hover:text-white"><PencilLine className="size-3.5" />编辑</Button>
+                    <Button variant="outline" size="sm" disabled={isMutating} onClick={() => setDeleting(item)} className={`rounded-lg ${dangerButtonClass}`}><Trash2 className="size-3.5" />删除</Button>
+                  </div>
                 </TableCell>
               </motion.tr>
               ))}
@@ -1119,6 +1141,16 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
         onOpenChange={setAdding}
       />
       <EditServiceModal key={editing?.id ?? "closed"} item={editing} open={Boolean(editing)} onOpenChange={(open) => !open && setEditing(null)} />
+      <DangerConfirmDialog
+        open={Boolean(deleting)}
+        title="删除价格表服务"
+        description="确定要删除该服务吗？删除后不可恢复，但历史订单不受影响。"
+        confirmLabel="删除服务"
+        icon={Trash2}
+        isMutating={isMutating}
+        onOpenChange={(open) => !open && setDeleting(null)}
+        onConfirm={confirmDeleteMenuItem}
+      />
     </div>
   );
 }

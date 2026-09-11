@@ -15,6 +15,13 @@
       "when": 1789114159267,
       "tag": "0001_far_red_hulk",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789135361034,
+      "tag": "0002_wonderful_wendigo",
+      "breakpoints": true
     }
   ]
 }

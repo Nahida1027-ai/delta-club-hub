@@ -71,6 +71,8 @@ export interface Order {
   id: string;
   menu_item_id: string;
   assigned_worker_ids: string[];
+  /** 下单时冻结的分配模式；旧单仍可从 pricing_snapshot 回填。 */
+  split_type: SplitType;
   status: "active" | "completed";
   tip: number;
   final_club_income: number | null;

@@ -51,6 +51,7 @@ interface ClubStore extends ClubData {
   deleteHistoricalOrder: (orderId: string) => Promise<void>;
   cancelAndReassign: (orderId: string, oldWorkerId: string) => Promise<ReassignmentResult>;
   updateMenuItem: (item: PriceMenuItem) => Promise<void>;
+  deleteMenuItem: (menuItemId: string) => Promise<void>;
   createOrder: (
     menuItemId: string,
     workerIds: string[],
@@ -476,6 +477,37 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 
+  deleteMenuItem: async (menuItemId) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const item = state.menu.find((candidate) => candidate.id === menuItemId);
+    if (!item) throw new Error("未找到该服务项目");
+    if (
+      state.orders.some(
+        (order) => order.status === "active" && order.menu_item_id === menuItemId,
+      )
+    ) {
+      throw new Error("该服务有正在进行的订单，无法删除，请先完结订单");
+    }
+
+    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    set({
+      menu: state.menu.filter((candidate) => candidate.id !== menuItemId),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const data = await apiRequest({
+        action: "delete_menu_item",
+        menu_item_id: menuItemId,
+      });
+      set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
   createOrder: async (menuItemId, workerIds, specialRequirements = []) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
@@ -515,6 +547,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       id: optimisticId,
       menu_item_id: menuItemId,
       assigned_worker_ids: workerIds,
+      split_type: menuItem.split_type,
       status: "active",
       tip: 0,
       final_club_income: null,
@@ -561,14 +594,15 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
 
     /*
-     * 完整结算公式（calculateSettlement 内部全部按整数分计算）：
-     * 1. 抽成基数 = order_original_total = base_price_snapshot + special_total。
-     * 2. uniform：俱乐部抽成 = 抽成基数 × 统一抽成率（双人也只抽一次）。
-     *    by_tier：俱乐部抽成 = Σ(抽成基数 × 每名打手冻结档位对应的抽成率)。
-     * 3. 不含打赏的打手池 = 抽成基数 - 俱乐部总抽成。
-     * 4. 最终打手池 = 不含打赏的打手池 + tip；打赏不参与抽成。
-     * 5. single / equal / tiered 按冻结的 payout_weights 分配最终打手池，
-     *    并用最大余数法处理尾差，保证俱乐部 + 打手 = 原始总价 + 打赏。
+     * finishOrder 权威公式（calculateSettlement 内部全部按整数分计算）：
+     * 1. 订单总价 = order_original_total = base_price_snapshot + special_total，
+     *    特殊需求与基础价一样参与抽成。
+     * 2. single：打手实得 = 订单总价 × (1 - 该打手档位抽成率)。
+     * 3. equal：先把订单总价平分，每名打手实得 = 自己的 1/2 份额 ×
+     *    (1 - 自己档位抽成率)；俱乐部抽成 = 订单总价 - 两人基础实得之和。
+     * 4. 打赏不参与抽成：single 全给一人，equal 平分；旧 tiered 订单按冻结权重分配。
+     * 5. 168 元、1档 25%、2档 20% 的 equal 单：两人各分 84 元，
+     *    实得分别为 63 元、67.2 元，俱乐部实得 37.8 元。
      */
     const tipCents = toCents(tip);
     const settlement = calculateSettlement(
