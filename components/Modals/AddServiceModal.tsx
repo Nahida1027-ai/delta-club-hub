@@ -142,6 +142,8 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
 
     const item: Omit<PriceMenuItem, "id"> = {
       service_name: serviceName.trim(),
+      folderId: null,
+      order: 0,
       order_type: orderType,
       base_price: orderType === "escort" ? Number(price) : 0,
       hourly_rate: orderType === "companion" ? Number(hourlyRate) : 0,

@@ -32,7 +32,6 @@ import {
   Trash2,
   Users,
   WalletCards,
-  Zap,
 } from "lucide-react";
 import {
   Bar,
@@ -51,6 +50,8 @@ import { AddServiceModal } from "@/components/Modals/AddServiceModal";
 import { AddWorkerModal } from "@/components/Modals/AddWorkerModal";
 import { EditServiceModal } from "@/components/Modals/EditServiceModal";
 import { OrderConfirmModal } from "@/components/Modals/OrderConfirmModal";
+import { SortableHandle, SortableList } from "@/components/dnd/SortableList";
+import { ServiceFolderBoard } from "@/components/folders/ServiceFolderBoard";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -90,12 +91,14 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
+  Folder,
   Order,
   PriceMenuItem,
   SettlementResult,
   TipsByWorker,
   Worker,
   WorkerTier,
+  WorkerType,
 } from "@/lib/club-types";
 import {
   calculateSettlement,
@@ -505,10 +508,12 @@ function ServiceRule({ item }: { item: PriceMenuItem }) {
 
 function OrderDesk({
   menu,
+  folders,
   workers,
   orders,
 }: {
   menu: PriceMenuItem[];
+  folders: Folder[];
   workers: Worker[];
   orders: Order[];
 }) {
@@ -519,43 +524,29 @@ function OrderDesk({
   } | null>(null);
   const activeOrders = orders.filter((order) => order.status === "active");
 
-  function autoAssign(item: PriceMenuItem) {
-    const recommended = workers.find(
-      (worker) => worker.status === "idle" && item.eligible_tiers.includes(worker.tier),
-    );
-    if (!recommended) {
-      toast.error("暂无匹配的空闲打手");
-      return;
-    }
-    setConfirmation({ item, initialWorkerIds: [recommended.id] });
-  }
-
   return (
     <div className="space-y-8">
       <SectionTitle eyebrow="ORDER DESK" title="老板点单" detail="服务规则在下单瞬间冻结，后续调价不会改变这张订单。" />
-      <div className="grid items-stretch gap-4 lg:grid-cols-3">
-        <AnimatePresence initial={false} mode="popLayout">
-          {menu.map((item, index) => {
+      <ServiceFolderBoard
+        menu={menu}
+        folders={folders}
+        contentClassName="grid items-stretch gap-4 lg:grid-cols-3"
+        renderItem={(item, dragBindings, isOverlay) => {
           const available = workers.filter(
             (worker) => worker.status === "idle" && item.eligible_tiers.includes(worker.tier),
           ).length;
           return (
-            <motion.article
-              layout
-              key={item.id}
-              initial={{ opacity: 0, y: 14 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, x: -48, scale: 0.98 }}
-              transition={{ delay: index * 0.05 }}
-              className={`${glassCard} group relative flex h-full flex-col overflow-hidden p-5 sm:p-6`}
-            >
+            <article className={`${glassCard} group relative flex h-full min-h-[318px] flex-col overflow-hidden p-5 sm:p-6`}>
               <div className="absolute -right-10 -top-10 size-32 rounded-full bg-[#007AFF]/10 blur-3xl transition group-hover:bg-[#007AFF]/18" />
               <div className="relative flex h-full flex-1 flex-col">
                 <div className="flex items-start justify-between gap-4">
                   <span className="grid size-11 place-items-center rounded-2xl bg-[#007AFF]/14 text-[#64D2FF]">
                     {item.split_type === "single" ? <Target className="size-5" /> : item.split_type === "equal" ? <Users className="size-5" /> : <Sparkles className="size-5" />}
                   </span>
-                  <span className="text-sm text-white/35">{available} 人可接</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-white/35">{available} 人可接</span>
+                    <SortableHandle bindings={dragBindings} disabled={isMutating || isOverlay} label={`拖动服务 ${item.service_name}`} />
+                  </div>
                 </div>
                 <h3 className="mt-5 text-lg font-semibold text-white">{item.service_name}</h3>
                 <p className="mt-2 text-[32px] font-semibold tracking-[-0.045em] text-white">
@@ -567,28 +558,20 @@ function OrderDesk({
                 {!available || (item.split_type !== "single" && available < 2) ? (
                   <p className="mt-3 text-sm text-[#FF6961]">匹配的空闲打手不足，暂时无法派单</p>
                 ) : null}
-                <div className="mt-auto flex gap-2 pt-6">
-                  {item.split_type === "single" ? (
-                    <>
-                      <Button disabled={!available || isMutating} onClick={() => autoAssign(item)} className="h-11 flex-1 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]">
-                        <Zap className="size-4" />自动派单
-                      </Button>
-                      <Button disabled={!available || isMutating} variant="outline" onClick={() => setConfirmation({ item, initialWorkerIds: [] })} className="h-11 rounded-xl border-white/10 bg-white/[0.045] text-white hover:bg-white/10 hover:text-white">
-                        手动选择
-                      </Button>
-                    </>
-                  ) : (
-                    <Button disabled={available < 2 || isMutating} onClick={() => setConfirmation({ item, initialWorkerIds: [] })} className="h-11 w-full rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]">
-                      选择 2 名打手<ChevronRight className="size-4" />
-                    </Button>
-                  )}
+                <div className="mt-auto pt-6">
+                  <Button
+                    disabled={!available || (item.split_type !== "single" && available < 2) || isMutating || isOverlay}
+                    onClick={() => setConfirmation({ item, initialWorkerIds: [] })}
+                    className="h-11 w-full rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]"
+                  >
+                    <Users className="size-4" />选择两名打手<ChevronRight className="size-4" />
+                  </Button>
                 </div>
               </div>
-            </motion.article>
+            </article>
           );
-          })}
-        </AnimatePresence>
-      </div>
+        }}
+      />
 
       <article className={`${glassCard} overflow-hidden`}>
         <div className="flex items-center justify-between border-b border-white/[0.07] px-5 py-4 sm:px-6">
@@ -659,6 +642,7 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
   const [reassigning, setReassigning] = useState<{ order: Order; worker: Worker } | null>(null);
   const deleteWorker = useClubStore((state) => state.deleteWorker);
   const cancelAndReassign = useClubStore((state) => state.cancelAndReassign);
+  const reorderWorkers = useClubStore((state) => state.reorderWorkers);
   const isMutating = useClubStore((state) => state.is_mutating);
 
   async function confirmDeleteWorker() {
@@ -705,30 +689,25 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
           </Button>
         )}
       />
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <AnimatePresence mode="popLayout">
-          {workers.map((worker, index) => {
+      <SortableList
+        items={workers}
+        getId={(worker) => worker.id}
+        onReorder={async (ids) => {
+          try {
+            await reorderWorkers(ids);
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : "打手排序保存失败");
+          }
+        }}
+        disabled={isMutating}
+        className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
+        renderItem={(worker, dragBindings, isOverlay) => {
             const activeOrder = orders.find(
               (order) => order.status === "active" && order.assigned_worker_ids.includes(worker.id),
             );
             const busy = worker.status === "busy";
             return (
-              <motion.article
-                layout
-                key={worker.id}
-                initial={{ opacity: 0, scale: 0.96, y: 20 }}
-                animate={{
-                  opacity: 1,
-                  y: 0,
-                  scale: busy ? 1.012 : 1,
-                  boxShadow: busy
-                    ? "0 22px 58px rgba(255,69,58,.12)"
-                    : "0 18px 48px rgba(0,0,0,.2)",
-                }}
-                exit={{ opacity: 0, scale: 0.94, y: 12 }}
-                transition={{ type: "spring", stiffness: 230, damping: 23, delay: index * 0.025 }}
-                className={`${glassCard} overflow-hidden p-5`}
-              >
+              <article className={`${glassCard} group h-full overflow-hidden p-5 ${busy ? "shadow-[0_22px_58px_rgba(255,69,58,.12)]" : "shadow-[0_18px_48px_rgba(0,0,0,.2)]"}`}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex min-w-0 items-center gap-3">
                     <div className={`grid size-12 shrink-0 place-items-center rounded-2xl text-lg font-semibold ${busy ? "bg-[#FF453A]/12 text-[#FF6961]" : "bg-[#30D158]/12 text-[#5FE778]"}`}>
@@ -742,7 +721,15 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                       </div>
                     </div>
                   </div>
-                  <TierBadge tier={worker.tier} />
+                  <div className="flex shrink-0 items-start gap-1.5">
+                    <div className="flex flex-col items-end gap-1.5">
+                      <TierBadge tier={worker.tier} />
+                      <span className={`rounded-md px-2 py-1 text-[11px] ${worker.workerType === "entertainment" ? "bg-[#BF5AF2]/14 text-[#D9A0FF]" : "bg-[#007AFF]/10 text-[#8EC9FF]"}`}>
+                        {worker.workerType === "entertainment" ? "娱乐陪玩" : "普通打手"}
+                      </span>
+                    </div>
+                    <SortableHandle bindings={dragBindings} disabled={isMutating || isOverlay} label={`拖动打手 ${worker.name}`} />
+                  </div>
                 </div>
 
                 <div className="mt-4 grid grid-cols-2 gap-2">
@@ -835,11 +822,10 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                     </motion.div>
                   )}
                 </AnimatePresence>
-              </motion.article>
+              </article>
             );
-          })}
-        </AnimatePresence>
-      </div>
+          }}
+      />
       <AddWorkerModal
         key={adding ? "open" : "closed"}
         open={adding}
@@ -895,6 +881,7 @@ function EditWorkerDialog({
   const isMutating = useClubStore((state) => state.is_mutating);
   const [name, setName] = useState(worker?.name ?? "");
   const [tier, setTier] = useState<WorkerTier>(worker?.tier ?? "1档");
+  const [workerType, setWorkerType] = useState<WorkerType>(worker?.workerType ?? "standard");
 
   if (!worker) return null;
   const busy = worker.status === "busy";
@@ -902,7 +889,7 @@ function EditWorkerDialog({
   async function save() {
     if (!name.trim()) return;
     try {
-      await updateWorker(worker!.id, { name, tier });
+      await updateWorker(worker!.id, { name, tier, workerType });
       toast.success("打手信息已更新");
       onOpenChange(false);
     } catch (error) {
@@ -933,7 +920,20 @@ function EditWorkerDialog({
                 {tiers.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
               </SelectContent>
             </Select>
-            {busy ? <p className="text-[13px] leading-5 text-white/40">该打手正在执行订单，本次只能修改姓名。</p> : null}
+          </label>
+          <label className="space-y-2">
+            <span className="flex items-center justify-between text-sm font-medium text-white/65">
+              <span>打手类型</span>
+              {busy ? <span className="text-[#FF6961]">接单中已锁定</span> : null}
+            </span>
+            <Select value={workerType} disabled={busy} onValueChange={(value) => setWorkerType(value as WorkerType)}>
+              <SelectTrigger className={`${inputClass} w-full disabled:cursor-not-allowed disabled:opacity-45`}><SelectValue /></SelectTrigger>
+              <SelectContent className="border-white/10 bg-[#242426] text-white">
+                <SelectItem value="standard">普通打手</SelectItem>
+                <SelectItem value="entertainment">娱乐陪玩</SelectItem>
+              </SelectContent>
+            </Select>
+            {busy ? <p className="text-[13px] leading-5 text-white/40">该打手正在执行订单，本次只能修改姓名；档位和类型保持锁定。</p> : null}
           </label>
           <DialogFooter>
             <Button variant="ghost" className="h-11 rounded-xl text-white/60 hover:bg-white/[0.06] hover:text-white" onClick={() => onOpenChange(false)}>取消</Button>
@@ -1176,7 +1176,7 @@ function FinishOrderDialog({
   );
 }
 
-function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
+function PriceMenuPanel({ menu, folders }: { menu: PriceMenuItem[]; folders: Folder[] }) {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<PriceMenuItem | null>(null);
   const [deleting, setDeleting] = useState<PriceMenuItem | null>(null);
@@ -1212,74 +1212,59 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
           </Button>
         )}
       />
-      <article className={`${glassCard} overflow-hidden`}>
-        <Table>
-          <TableHeader>
-            <TableRow className="border-white/[0.07] hover:bg-transparent">
-              <TableHead className="h-12 px-5 text-white/40 sm:px-6">服务项目</TableHead>
-              <TableHead className="text-white/40">计价方式</TableHead>
-              <TableHead className="text-white/40">俱乐部抽成</TableHead>
-              <TableHead className="text-white/40">分配模式</TableHead>
-              <TableHead className="text-white/40">可接档位</TableHead>
-              <TableHead className="pr-5 text-right text-white/40 sm:pr-6">操作</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            <AnimatePresence initial={false} mode="popLayout">
-              {menu.map((item) => (
-              <motion.tr
-                layout
-                key={item.id}
-                initial={{ opacity: 0, x: 56 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -56 }}
-                transition={{ type: "spring", stiffness: 260, damping: 26 }}
-                className="border-b border-white/[0.06] transition-colors hover:bg-white/[0.025]"
-              >
-                <TableCell className="px-5 py-5 sm:px-6">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-white">{item.service_name}</span>
-                    <span className={`rounded-md px-2 py-1 text-[11px] ${normalizeOrderType(item.order_type) === "companion" ? "bg-[#30D158]/12 text-[#7EF29A]" : "bg-[#007AFF]/12 text-[#64D2FF]"}`}>
-                      {normalizeOrderType(item.order_type) === "companion" ? "陪玩" : "护航"}
-                    </span>
-                  </div>
-                </TableCell>
-                <TableCell className="font-semibold text-white">
+      <ServiceFolderBoard
+        menu={menu}
+        folders={folders}
+        contentClassName="grid gap-2"
+        emptyLabel="暂无服务，可拖入此文件夹"
+        renderItem={(item, dragBindings, isOverlay) => (
+          <article className="group h-full rounded-2xl border border-white/[0.075] bg-white/[0.028] p-4 transition-colors hover:bg-white/[0.045] sm:p-5">
+            <div className="grid gap-4 lg:grid-cols-[minmax(190px,1.35fr)_minmax(120px,.7fr)_minmax(190px,1.1fr)_minmax(130px,.75fr)_minmax(150px,.8fr)_auto] lg:items-center">
+              <div className="flex min-w-0 items-center gap-3">
+                <SortableHandle bindings={dragBindings} disabled={isMutating || isOverlay} label={`拖动服务 ${item.service_name}`} />
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-white">{item.service_name}</p>
+                  <span className={`mt-1.5 inline-flex rounded-md px-2 py-1 text-[11px] ${normalizeOrderType(item.order_type) === "companion" ? "bg-[#30D158]/12 text-[#7EF29A]" : "bg-[#007AFF]/12 text-[#64D2FF]"}`}>
+                    {normalizeOrderType(item.order_type) === "companion" ? "陪玩" : "护航"}
+                  </span>
+                </div>
+              </div>
+              <div>
+                <p className="text-[12px] text-white/32 lg:hidden">计价方式</p>
+                <p className="mt-1 font-semibold text-white lg:mt-0">
                   {normalizeOrderType(item.order_type) === "companion"
                     ? <>{formatMoney(item.hourly_rate)} <span className="text-[12px] font-normal text-white/35">/ 小时</span></>
                     : formatMoney(item.base_price)}
-                </TableCell>
-                <TableCell>
-                  {item.commission_mode === "by_tier" ? (
-                    <div>
-                      <span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 font-medium text-[#64D2FF]">按档位</span>
-                      <p className="mt-2 whitespace-nowrap text-[12px] text-white/38">
-                        1档 {item.tier_commission_rates["1档"]}% / 2档 {item.tier_commission_rates["2档"]}% / 3档 {item.tier_commission_rates["3档"]}%
-                      </p>
-                    </div>
-                  ) : (
-                    <span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 font-medium text-[#64D2FF]">统一 {item.club_commission_rate}%</span>
-                  )}
-                </TableCell>
-                <TableCell>
-                  <div>
-                    <span className="text-white/70">{splitLabel(item.split_type)}</span>
-                    {item.split_type === "tiered" && item.tiered_ratios ? <p className="mt-1 text-[12px] text-white/35">1档 {item.tiered_ratios["1档"]}% / 2档 {item.tiered_ratios["2档"]}%</p> : null}
+                </p>
+              </div>
+              <div>
+                <p className="text-[12px] text-white/32 lg:hidden">俱乐部抽成</p>
+                {item.commission_mode === "by_tier" ? (
+                  <div className="mt-1 lg:mt-0">
+                    <span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 text-sm font-medium text-[#64D2FF]">按档位</span>
+                    <p className="mt-2 whitespace-nowrap text-[12px] text-white/38">1档 {item.tier_commission_rates["1档"]}% / 2档 {item.tier_commission_rates["2档"]}% / 3档 {item.tier_commission_rates["3档"]}%</p>
                   </div>
-                </TableCell>
-                <TableCell><div className="flex gap-1">{item.eligible_tiers.map((tier) => <TierBadge key={tier} tier={tier} />)}</div></TableCell>
-                <TableCell className="pr-5 text-right sm:pr-6">
-                  <div className="flex justify-end gap-2">
-                    <Button variant="outline" size="sm" disabled={isMutating} onClick={() => setEditing(item)} className="rounded-lg border-[#007AFF]/25 bg-[#007AFF]/10 text-[#64D2FF] hover:bg-[#007AFF]/20 hover:text-white"><PencilLine className="size-3.5" />编辑</Button>
-                    <Button variant="outline" size="sm" disabled={isMutating} onClick={() => setDeleting(item)} className={`rounded-lg ${dangerButtonClass}`}><Trash2 className="size-3.5" />删除</Button>
-                  </div>
-                </TableCell>
-              </motion.tr>
-              ))}
-            </AnimatePresence>
-          </TableBody>
-        </Table>
-      </article>
+                ) : (
+                  <span className="mt-1 inline-flex rounded-lg bg-[#007AFF]/10 px-2.5 py-1 text-sm font-medium text-[#64D2FF] lg:mt-0">统一 {item.club_commission_rate}%</span>
+                )}
+              </div>
+              <div>
+                <p className="text-[12px] text-white/32 lg:hidden">分配模式</p>
+                <p className="mt-1 text-sm text-white/70 lg:mt-0">{splitLabel(item.split_type)}</p>
+                {item.split_type === "tiered" && item.tiered_ratios ? <p className="mt-1 text-[12px] text-white/35">1档 {item.tiered_ratios["1档"]}% / 2档 {item.tiered_ratios["2档"]}%</p> : null}
+              </div>
+              <div>
+                <p className="mb-1.5 text-[12px] text-white/32 lg:hidden">可接档位</p>
+                <div className="flex flex-wrap gap-1">{item.eligible_tiers.map((tier) => <TierBadge key={tier} tier={tier} />)}</div>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" size="sm" disabled={isMutating || isOverlay} onClick={() => setEditing(item)} className="rounded-lg border-[#007AFF]/25 bg-[#007AFF]/10 text-[#64D2FF] hover:bg-[#007AFF]/20 hover:text-white"><PencilLine className="size-3.5" />编辑</Button>
+                <Button variant="outline" size="sm" disabled={isMutating || isOverlay} onClick={() => setDeleting(item)} className={`rounded-lg ${dangerButtonClass}`}><Trash2 className="size-3.5" />删除</Button>
+              </div>
+            </div>
+          </article>
+        )}
+      />
       <div className="grid gap-4 md:grid-cols-3">
         <RuleNote icon={LockKeyhole} title="订单规则快照" text="创建订单时冻结价格、档位抽成、模式和权重；旧单永远不被新规则改写。" />
         <RuleNote icon={Coins} title="加价参与抽成" text="基础价与特殊需求加价共同参与抽成；打赏仍完整进入打手分配池。" />
@@ -1587,6 +1572,7 @@ export function ClubHub() {
   useClubWebMcp();
   const workers = useClubStore((state) => state.workers);
   const menu = useClubStore((state) => state.menu);
+  const folders = useClubStore((state) => state.folders);
   const orders = useClubStore((state) => state.orders);
   const isReady = useClubStore((state) => state.is_ready);
   const isLoading = useClubStore((state) => state.is_loading);
@@ -1652,9 +1638,9 @@ export function ClubHub() {
         ) : null}
 
         <TabsContent value="dashboard" className="pt-8"><Dashboard workers={workers} orders={orders} selectedMonth={selectedMonth} onMonthChange={setSelectedMonth} /></TabsContent>
-        <TabsContent value="orders" className="pt-8"><OrderDesk menu={menu} workers={workers} orders={orders} /></TabsContent>
+        <TabsContent value="orders" className="pt-8"><OrderDesk menu={menu} folders={folders} workers={workers} orders={orders} /></TabsContent>
         <TabsContent value="workers" className="pt-8"><WorkerBoard workers={workers} orders={orders} /></TabsContent>
-        <TabsContent value="pricing" className="pt-8"><PriceMenuPanel menu={menu} /></TabsContent>
+        <TabsContent value="pricing" className="pt-8"><PriceMenuPanel menu={menu} folders={folders} /></TabsContent>
         <TabsContent value="history" className="pt-8"><HistoryPanel workers={workers} orders={orders} selectedMonth={selectedMonth} onMonthChange={setSelectedMonth} /></TabsContent>
       </Tabs>
     </main>

@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import type {
   ClubData,
+  Folder,
   Order,
   OrderPricingSnapshot,
   PriceMenuItem,
@@ -11,6 +12,7 @@ import type {
   TipsByWorker,
   Worker,
   WorkerTier,
+  WorkerType,
 } from "@/lib/club-types";
 import {
   buildPayoutWeights,
@@ -43,6 +45,9 @@ interface ReassignmentResult {
   newWorkerName: string;
 }
 
+type MenuItemInput = Omit<PriceMenuItem, "id" | "folderId" | "order"> &
+  Partial<Pick<PriceMenuItem, "folderId" | "order">>;
+
 interface ClubStore extends ClubData {
   is_loading: boolean;
   is_ready: boolean;
@@ -50,14 +55,21 @@ interface ClubStore extends ClubData {
   error: string | null;
   last_synced_at: string | null;
   load: () => Promise<void>;
-  addWorker: (data: { name: string; tier: WorkerTier }) => Promise<Worker>;
-  addMenuItem: (data: Omit<PriceMenuItem, "id">) => Promise<PriceMenuItem>;
-  updateWorker: (id: string, data: { name: string; tier: WorkerTier }) => Promise<void>;
+  addWorker: (data: { name: string; tier: WorkerTier; workerType?: WorkerType }) => Promise<Worker>;
+  addMenuItem: (data: MenuItemInput) => Promise<PriceMenuItem>;
+  updateWorker: (id: string, data: { name: string; tier: WorkerTier; workerType: WorkerType }) => Promise<void>;
   deleteWorker: (id: string) => Promise<void>;
   deleteHistoricalOrder: (orderId: string) => Promise<void>;
   cancelAndReassign: (orderId: string, oldWorkerId: string) => Promise<ReassignmentResult>;
   updateMenuItem: (item: PriceMenuItem) => Promise<void>;
   deleteMenuItem: (menuItemId: string) => Promise<void>;
+  reorderWorkers: (newOrder: string[]) => Promise<void>;
+  reorderMenuItems: (newOrder: string[]) => Promise<void>;
+  reorderFolders: (newOrder: string[]) => Promise<void>;
+  addFolder: (name: string) => Promise<Folder>;
+  renameFolder: (folderId: string, newName: string) => Promise<void>;
+  deleteFolder: (folderId: string) => Promise<void>;
+  moveItemToFolder: (itemId: string, folderId: string | null) => Promise<void>;
   createOrder: (
     menuItemId: string,
     workerIds: string[],
@@ -144,9 +156,43 @@ function decrementCompletionCounts(workers: Worker[], removedOrders: Order[]) {
   }));
 }
 
+function validateWorkerType(value: unknown): WorkerType {
+  if (value === undefined || value === null || value === "standard") return "standard";
+  if (value === "entertainment") return "entertainment";
+  throw new Error("请选择有效打手类型");
+}
+
+function validateFolderName(value: string) {
+  const name = value.trim();
+  if (!name) throw new Error("请输入文件夹名称");
+  if (Array.from(name).length > 20) throw new Error("文件夹名称最多 20 个字符");
+  return name;
+}
+
+function validateExactOrder(newOrder: string[], expectedIds: string[], label: string) {
+  const unique = new Set(newOrder);
+  if (
+    unique.size !== newOrder.length ||
+    newOrder.length !== expectedIds.length ||
+    expectedIds.some((id) => !unique.has(id))
+  ) {
+    throw new Error(`${label}排序数据无效，请刷新后重试`);
+  }
+}
+
+function clubSnapshot(data: ClubData): ClubData {
+  return {
+    workers: data.workers,
+    menu: data.menu,
+    folders: data.folders,
+    orders: data.orders,
+  };
+}
+
 export const useClubStore = create<ClubStore>((set, get) => ({
   workers: [],
   menu: [],
+  folders: [],
   orders: [],
   is_loading: false,
   is_ready: false,
@@ -162,6 +208,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       set({
         workers: data.workers,
         menu: data.menu,
+        folders: data.folders,
         orders: data.orders,
         is_loading: false,
         is_ready: true,
@@ -185,6 +232,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     if (!["1档", "2档", "3档"].includes(data.tier)) {
       throw new Error("请选择有效档位");
     }
+    const workerType = validateWorkerType(data.workerType);
     if (
       state.workers.some(
         (worker) => worker.name.trim().toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"),
@@ -197,10 +245,14 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       id: crypto.randomUUID(),
       name,
       tier: data.tier,
+      workerType,
+      order: state.workers.length
+        ? Math.max(...state.workers.map((current) => current.order)) + 1
+        : 0,
       status: "idle",
       total_completed_orders: 0,
     };
-    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    const previous = clubSnapshot(state);
     set({
       workers: [...state.workers, worker],
       is_mutating: true,
@@ -209,8 +261,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     try {
       const result = await apiRequest({ action: "add_worker", worker });
       const createdWorker =
-        result.created_worker ??
         result.workers.find((candidate) => candidate.id === worker.id) ??
+        result.created_worker ??
         worker;
       set({
         ...result,
@@ -236,6 +288,14 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       ...data,
       id: crypto.randomUUID(),
       service_name: data.service_name.trim(),
+      folderId: data.folderId ?? null,
+      order: state.menu.filter((current) => current.folderId === (data.folderId ?? null)).length
+        ? Math.max(
+            ...state.menu
+              .filter((current) => current.folderId === (data.folderId ?? null))
+              .map((current) => current.order),
+          ) + 1
+        : 0,
       order_type: orderType,
       base_price: orderType === "escort" ? data.base_price : 0,
       hourly_rate: orderType === "companion" ? data.hourly_rate : 0,
@@ -270,7 +330,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       throw new Error("已存在同名服务，请使用其他名称");
     }
 
-    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    const previous = clubSnapshot(state);
     set({
       menu: [...state.menu, item],
       is_mutating: true,
@@ -279,8 +339,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     try {
       const result = await apiRequest({ action: "add_menu_item", item });
       const createdMenuItem =
-        result.created_menu_item ??
         result.menu.find((candidate) => candidate.id === item.id) ??
+        result.created_menu_item ??
         item;
       set({
         ...result,
@@ -298,6 +358,182 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 
+  reorderWorkers: async (newOrder) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    validateExactOrder(newOrder, state.workers.map((worker) => worker.id), "打手");
+    const orderById = new Map(newOrder.map((id, index) => [id, index]));
+    const previous = clubSnapshot(state);
+    set({
+      workers: [...state.workers]
+        .map((worker) => ({ ...worker, order: orderById.get(worker.id) ?? worker.order }))
+        .sort((a, b) => a.order - b.order),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "reorder_workers", worker_ids: newOrder });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  reorderMenuItems: async (newOrder) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    if (!newOrder.length) return;
+    const state = get();
+    const first = state.menu.find((item) => item.id === newOrder[0]);
+    if (!first) throw new Error("服务排序数据无效，请刷新后重试");
+    const group = state.menu.filter((item) => item.folderId === first.folderId);
+    validateExactOrder(newOrder, group.map((item) => item.id), "服务");
+    const orderById = new Map(newOrder.map((id, index) => [id, index]));
+    const previous = clubSnapshot(state);
+    set({
+      menu: state.menu
+        .map((item) => orderById.has(item.id)
+          ? { ...item, order: orderById.get(item.id) ?? item.order }
+          : item)
+        .sort((a, b) => a.order - b.order),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "reorder_menu_items", item_ids: newOrder });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  reorderFolders: async (newOrder) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    validateExactOrder(newOrder, state.folders.map((folder) => folder.id), "文件夹");
+    const orderById = new Map(newOrder.map((id, index) => [id, index]));
+    const previous = clubSnapshot(state);
+    set({
+      folders: [...state.folders]
+        .map((folder) => ({ ...folder, order: orderById.get(folder.id) ?? folder.order }))
+        .sort((a, b) => a.order - b.order),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "reorder_folders", folder_ids: newOrder });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  addFolder: async (value) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const name = validateFolderName(value);
+    if (state.folders.some((folder) => folder.name.toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"))) {
+      throw new Error("已存在同名文件夹");
+    }
+    const folder: Folder = {
+      id: crypto.randomUUID(),
+      name,
+      order: state.folders.length ? Math.max(...state.folders.map((item) => item.order)) + 1 : 0,
+      createdAt: Date.now(),
+    };
+    const previous = clubSnapshot(state);
+    set({ folders: [...state.folders, folder], is_mutating: true, error: null });
+    try {
+      const result = await apiRequest({ action: "add_folder", folder });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+      return result.folders.find((item) => item.id === folder.id) ?? folder;
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  renameFolder: async (folderId, value) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const name = validateFolderName(value);
+    if (!state.folders.some((folder) => folder.id === folderId)) throw new Error("未找到该文件夹");
+    if (state.folders.some((folder) => folder.id !== folderId && folder.name.toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"))) {
+      throw new Error("已存在同名文件夹");
+    }
+    const previous = clubSnapshot(state);
+    set({
+      folders: state.folders.map((folder) => folder.id === folderId ? { ...folder, name } : folder),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "rename_folder", folder_id: folderId, name });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  deleteFolder: async (folderId) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    if (!state.folders.some((folder) => folder.id === folderId)) throw new Error("未找到该文件夹");
+    const rootItems = state.menu.filter((item) => item.folderId === null);
+    const nextRootOrder = rootItems.length ? Math.max(...rootItems.map((item) => item.order)) + 1 : 0;
+    const movedItems = state.menu
+      .filter((item) => item.folderId === folderId)
+      .sort((a, b) => a.order - b.order);
+    const movedOrderById = new Map(movedItems.map((item, index) => [item.id, nextRootOrder + index]));
+    const previous = clubSnapshot(state);
+    set({
+      folders: state.folders.filter((folder) => folder.id !== folderId),
+      menu: state.menu.map((item) => movedOrderById.has(item.id)
+        ? { ...item, folderId: null, order: movedOrderById.get(item.id) ?? item.order }
+        : item),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "delete_folder", folder_id: folderId });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  moveItemToFolder: async (itemId, folderId) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const item = state.menu.find((candidate) => candidate.id === itemId);
+    if (!item) throw new Error("未找到该服务项目");
+    if (folderId !== null && !state.folders.some((folder) => folder.id === folderId)) {
+      throw new Error("目标文件夹不存在");
+    }
+    if (item.folderId === folderId) return;
+    const targetItems = state.menu.filter((candidate) => candidate.folderId === folderId);
+    const nextOrder = targetItems.length ? Math.max(...targetItems.map((candidate) => candidate.order)) + 1 : 0;
+    const previous = clubSnapshot(state);
+    set({
+      menu: state.menu.map((candidate) => candidate.id === itemId
+        ? { ...candidate, folderId, order: nextOrder }
+        : candidate),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "move_item_to_folder", item_id: itemId, folder_id: folderId });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
   updateWorker: async (id, data) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
@@ -308,11 +544,15 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     if (worker.status === "busy" && data.tier !== worker.tier) {
       throw new Error("该打手正在接单，只能修改姓名");
     }
+    const workerType = validateWorkerType(data.workerType);
+    if (worker.status === "busy" && workerType !== worker.workerType) {
+      throw new Error("该打手正在接单，只能修改姓名");
+    }
 
-    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    const previous = clubSnapshot(state);
     set({
       workers: state.workers.map((candidate) =>
-        candidate.id === id ? { ...candidate, name, tier: data.tier } : candidate,
+        candidate.id === id ? { ...candidate, name, tier: data.tier, workerType } : candidate,
       ),
       is_mutating: true,
       error: null,
@@ -321,7 +561,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       const result = await apiRequest({
         action: "update_worker",
         worker_id: id,
-        data: { name, tier: data.tier },
+        data: { name, tier: data.tier, workerType },
       });
       set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
     } catch (error) {
@@ -342,7 +582,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     );
     // final_worker_incomes 已包含每名打手的基础工资与个人打赏；删除关联订单后，
     // 看板、排行榜、总支出及俱乐部收入都会从剩余订单实时重新派生。
-    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    const previous = clubSnapshot(state);
     set({
       workers: decrementCompletionCounts(
         state.workers.filter((candidate) => candidate.id !== id),
@@ -369,7 +609,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       throw new Error("只允许删除已完成的历史订单");
     }
 
-    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    const previous = clubSnapshot(state);
     // 删除整条历史订单即同时移除 final_worker_incomes（含个人打赏）与
     // final_club_income；所有财务汇总都基于剩余订单自动回退。
     set({
@@ -424,7 +664,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         ),
       },
     };
-    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    const previous = clubSnapshot(state);
     set({
       workers: state.workers.map((worker) => {
         if (worker.id === oldWorkerId) return { ...worker, status: "idle" };
@@ -478,7 +718,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         item.split_type === "tiered" ? ["1档", "2档"] : [...item.eligible_tiers],
     };
     validateMenuRule(normalizedItem);
-    const previous = { workers: get().workers, menu: get().menu, orders: get().orders };
+    const previous = clubSnapshot(get());
     set((state) => ({
       menu: state.menu.map((current) =>
         current.id === normalizedItem.id ? normalizedItem : current,
@@ -508,7 +748,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       throw new Error("该服务有正在进行的订单，无法删除，请先完结订单");
     }
 
-    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    const previous = clubSnapshot(state);
     set({
       menu: state.menu.filter((candidate) => candidate.id !== menuItemId),
       is_mutating: true,
@@ -596,7 +836,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       completed_at: null,
       pricing_snapshot: snapshot,
     };
-    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    const previous = clubSnapshot(state);
     set({
       workers: state.workers.map((worker) =>
         workerIds.includes(worker.id) ? { ...worker, status: "busy" } : worker,
@@ -654,7 +894,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     );
 
     const completedAt = new Date().toISOString();
-    const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    const previous = clubSnapshot(state);
     set({
       orders: state.orders.map((candidate) =>
         candidate.id === orderId

@@ -34,7 +34,7 @@ export function useClubWebMcp() {
             execute() {
               const state = useClubStore.getState();
               return {
-                workers: state.workers.map(({ id, name, tier, status }) => ({ id, name, tier, status })),
+                workers: state.workers.map(({ id, name, tier, workerType, order, status }) => ({ id, name, tier, workerType, order, status })),
                 activeOrders: state.orders
                   .filter((order) => order.status === "active")
                   .map((order) => ({
@@ -49,9 +49,12 @@ export function useClubWebMcp() {
                     totalPrice: order.total_price,
                     specialRequirementCount: order.special_requirements.length,
                   })),
-                services: state.menu.map(({ id, service_name, order_type, hourly_rate, split_type, commission_mode }) => ({
+                folders: state.folders,
+                services: state.menu.map(({ id, service_name, folderId, order, order_type, hourly_rate, split_type, commission_mode }) => ({
                   id,
                   serviceName: service_name,
+                  folderId,
+                  order,
                   orderType: order_type,
                   hourlyRate: hourly_rate,
                   splitType: split_type,

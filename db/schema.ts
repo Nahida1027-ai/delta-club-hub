@@ -5,13 +5,24 @@ export const workers = sqliteTable("workers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   tier: text("tier").notNull(),
+  workerType: text("worker_type").notNull().default("standard"),
+  sortOrder: integer("sort_order").notNull().default(0),
   status: text("status").notNull().default("idle"),
   totalCompletedOrders: integer("total_completed_orders").notNull().default(0),
+});
+
+export const folders = sqliteTable("folders", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: integer("created_at").notNull(),
 });
 
 export const priceMenu = sqliteTable("price_menu", {
   id: text("id").primaryKey(),
   serviceName: text("service_name").notNull(),
+  folderId: text("folder_id"),
+  sortOrder: integer("sort_order").notNull().default(0),
   orderType: text("order_type").notNull().default("escort"),
   basePriceCents: integer("base_price_cents").notNull(),
   hourlyRateCents: integer("hourly_rate_cents").notNull().default(0),

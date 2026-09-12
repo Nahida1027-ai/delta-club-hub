@@ -2,6 +2,8 @@ export type WorkerTier = "1档" | "2档" | "3档";
 
 export type WorkerStatus = "idle" | "busy";
 
+export type WorkerType = "standard" | "entertainment";
+
 export type SplitType = "single" | "equal" | "tiered";
 
 export type CommissionMode = "uniform" | "by_tier";
@@ -12,8 +14,19 @@ export interface Worker {
   id: string;
   name: string;
   tier: WorkerTier;
+  /** 仅作运营标识，不参与档位匹配与财务计算。 */
+  workerType: WorkerType;
+  /** 打手看板的持久化排序权重。 */
+  order: number;
   status: WorkerStatus;
   total_completed_orders: number;
+}
+
+export interface Folder {
+  id: string;
+  name: string;
+  order: number;
+  createdAt: number;
 }
 
 export interface TieredRatios {
@@ -35,6 +48,10 @@ export interface SpecialRequirement {
 export interface PriceMenuItem {
   id: string;
   service_name: string;
+  /** null 表示位于“未分类”根目录。 */
+  folderId: string | null;
+  /** 当前文件夹内的持久化排序权重。 */
+  order: number;
   /** 护航单使用固定价，陪玩单使用小时价。旧服务默认 escort。 */
   order_type: OrderType;
   base_price: number;
@@ -111,6 +128,7 @@ export interface Order {
 export interface ClubData {
   workers: Worker[];
   menu: PriceMenuItem[];
+  folders: Folder[];
   orders: Order[];
 }
 

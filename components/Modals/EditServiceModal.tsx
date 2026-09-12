@@ -194,6 +194,8 @@ function EditServiceForm({
     return {
       id: item.id,
       service_name: serviceName.trim(),
+      folderId: item.folderId,
+      order: item.order,
       order_type: orderType,
       base_price: orderType === "escort" ? Number(price) : 0,
       hourly_rate: orderType === "companion" ? Number(hourlyRate) : 0,
@@ -651,15 +653,15 @@ function buildPreview(item: PriceMenuItem) {
     validateMenuRule(item);
     const previewBasePrice = calculateOrderBasePrice(item, 1);
     const demoWorkers: Worker[] = item.split_type === "single"
-      ? [{ id: "demo-1", name: "示例打手", tier: item.eligible_tiers[0] ?? "1档", status: "idle", total_completed_orders: 0 }]
+      ? [{ id: "demo-1", name: "示例打手", tier: item.eligible_tiers[0] ?? "1档", workerType: "standard", order: 0, status: "idle", total_completed_orders: 0 }]
       : item.split_type === "tiered"
         ? [
-            { id: "demo-1", name: "1档打手", tier: "1档", status: "idle", total_completed_orders: 0 },
-            { id: "demo-2", name: "2档打手", tier: "2档", status: "idle", total_completed_orders: 0 },
+            { id: "demo-1", name: "1档打手", tier: "1档", workerType: "standard", order: 0, status: "idle", total_completed_orders: 0 },
+            { id: "demo-2", name: "2档打手", tier: "2档", workerType: "standard", order: 1, status: "idle", total_completed_orders: 0 },
           ]
         : [
-            { id: "demo-1", name: "打手 A", tier: item.eligible_tiers[0] ?? "1档", status: "idle", total_completed_orders: 0 },
-            { id: "demo-2", name: "打手 B", tier: item.eligible_tiers[1] ?? item.eligible_tiers[0] ?? "1档", status: "idle", total_completed_orders: 0 },
+            { id: "demo-1", name: "打手 A", tier: item.eligible_tiers[0] ?? "1档", workerType: "standard", order: 0, status: "idle", total_completed_orders: 0 },
+            { id: "demo-2", name: "打手 B", tier: item.eligible_tiers[1] ?? item.eligible_tiers[0] ?? "1档", workerType: "standard", order: 1, status: "idle", total_completed_orders: 0 },
           ];
     const payoutWeights = buildPayoutWeights(
       item.split_type,

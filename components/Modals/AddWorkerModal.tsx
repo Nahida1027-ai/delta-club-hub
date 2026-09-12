@@ -21,7 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { WorkerTier } from "@/lib/club-types";
+import type { WorkerTier, WorkerType } from "@/lib/club-types";
 import { useClubStore } from "@/store/use-club-store";
 
 const tiers: WorkerTier[] = ["1档", "2档", "3档"];
@@ -38,6 +38,7 @@ export function AddWorkerModal({ open, onOpenChange }: AddWorkerModalProps) {
   const isMutating = useClubStore((state) => state.is_mutating);
   const [name, setName] = useState("");
   const [tier, setTier] = useState<WorkerTier>("1档");
+  const [workerType, setWorkerType] = useState<WorkerType>("standard");
   const [nameTouched, setNameTouched] = useState(false);
   const [submitError, setSubmitError] = useState("");
 
@@ -61,7 +62,7 @@ export function AddWorkerModal({ open, onOpenChange }: AddWorkerModalProps) {
     if (!trimmedName || Array.from(trimmedName).length > 20) return;
 
     try {
-      const worker = await addWorker({ name: trimmedName, tier });
+      const worker = await addWorker({ name: trimmedName, tier, workerType });
       toast.success(`${worker.name} 已加入打手看板`, { duration: 2500 });
       onOpenChange(false);
     } catch (error) {
@@ -121,23 +122,43 @@ export function AddWorkerModal({ open, onOpenChange }: AddWorkerModalProps) {
             ) : null}
           </label>
 
-          <div className="space-y-2">
-            <label id="add-worker-tier-label" className="text-sm font-medium text-white/65">
-              档位
-            </label>
-            <Select value={tier} onValueChange={(value) => setTier(value as WorkerTier)}>
-              <SelectTrigger
-                aria-labelledby="add-worker-tier-label"
-                className={`${inputClass} w-full`}
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="border-white/10 bg-[#242426] text-white">
-                {tiers.map((item) => (
-                  <SelectItem key={item} value={item}>{item}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <label id="add-worker-tier-label" className="text-sm font-medium text-white/65">
+                档位
+              </label>
+              <Select value={tier} onValueChange={(value) => setTier(value as WorkerTier)}>
+                <SelectTrigger
+                  aria-labelledby="add-worker-tier-label"
+                  className={`${inputClass} w-full`}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="border-white/10 bg-[#242426] text-white">
+                  {tiers.map((item) => (
+                    <SelectItem key={item} value={item}>{item}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <label id="add-worker-type-label" className="text-sm font-medium text-white/65">
+                打手类型
+              </label>
+              <Select value={workerType} onValueChange={(value) => setWorkerType(value as WorkerType)}>
+                <SelectTrigger
+                  aria-labelledby="add-worker-type-label"
+                  className={`${inputClass} w-full`}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="border-white/10 bg-[#242426] text-white">
+                  <SelectItem value="standard">普通打手</SelectItem>
+                  <SelectItem value="entertainment">娱乐陪玩</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           <DialogFooter>
