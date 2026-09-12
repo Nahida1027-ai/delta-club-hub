@@ -175,7 +175,7 @@ export function OrderConfirmModal({
           item.tiered_ratios,
         ),
       };
-      preview = calculateSettlement(snapshot, 0, originalTotal);
+      preview = calculateSettlement(snapshot, {}, originalTotal);
     } catch (error) {
       validationMessage = error instanceof Error ? error.message : "订单信息不完整";
     }

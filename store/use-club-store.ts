@@ -8,6 +8,7 @@ import type {
   PriceMenuItem,
   SettlementResult,
   SpecialRequirement,
+  TipsByWorker,
   Worker,
   WorkerTier,
 } from "@/lib/club-types";
@@ -17,7 +18,9 @@ import {
   defaultTierCommissionRates,
   fromCents,
   normalizeSpecialRequirements,
+  normalizeTipsByWorker,
   specialRequirementsTotal,
+  tipsByWorkerTotal,
   toCents,
   validateMenuRule,
 } from "@/lib/settlement";
@@ -57,7 +60,7 @@ interface ClubStore extends ClubData {
     workerIds: string[],
     specialRequirements?: SpecialRequirement[],
   ) => Promise<string>;
-  finishOrder: (orderId: string, tip: number) => Promise<SettlementResult>;
+  finishOrder: (orderId: string, tipsByWorker: TipsByWorker) => Promise<SettlementResult>;
 }
 
 async function apiRequest(body?: Record<string, unknown>): Promise<ApiData> {
@@ -110,7 +113,7 @@ function findReplacementWorker(
       ),
     };
     try {
-      calculateSettlement(replacementSnapshot, 0, order.order_original_total);
+      calculateSettlement(replacementSnapshot, {}, order.order_original_total);
       return true;
     } catch {
       return false;
@@ -330,6 +333,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     const removedOrders = state.orders.filter((order) =>
       order.assigned_worker_ids.includes(id),
     );
+    // final_worker_incomes 已包含每名打手的基础工资与个人打赏；删除关联订单后，
+    // 看板、排行榜、总支出及俱乐部收入都会从剩余订单实时重新派生。
     const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
     set({
       workers: decrementCompletionCounts(
@@ -358,6 +363,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
 
     const previous = { workers: state.workers, menu: state.menu, orders: state.orders };
+    // 删除整条历史订单即同时移除 final_worker_incomes（含个人打赏）与
+    // final_club_income；所有财务汇总都基于剩余订单自动回退。
     set({
       workers: decrementCompletionCounts(state.workers, [order]),
       orders: state.orders.filter((candidate) => candidate.id !== orderId),
@@ -541,7 +548,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       tiered_ratios: menuItem.tiered_ratios,
       payout_weights: payoutWeights,
     };
-    calculateSettlement(snapshot, 0, orderOriginalTotal);
+    calculateSettlement(snapshot, {}, orderOriginalTotal);
     const optimisticId = `optimistic-${Date.now()}`;
     const optimisticOrder: Order = {
       id: optimisticId,
@@ -550,6 +557,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       split_type: menuItem.split_type,
       status: "active",
       tip: 0,
+      tips_by_worker: {},
       final_club_income: null,
       final_worker_incomes: [],
       special_requirements: normalizedRequirements,
@@ -585,7 +593,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 
-  finishOrder: async (orderId, tip) => {
+  finishOrder: async (orderId, tipsByWorker) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
     const order = state.orders.find((candidate) => candidate.id === orderId);
@@ -600,14 +608,20 @@ export const useClubStore = create<ClubStore>((set, get) => ({
      * 2. single：打手实得 = 订单总价 × (1 - 该打手档位抽成率)。
      * 3. equal：先把订单总价平分，每名打手实得 = 自己的 1/2 份额 ×
      *    (1 - 自己档位抽成率)；俱乐部抽成 = 订单总价 - 两人基础实得之和。
-     * 4. 打赏不参与抽成：single 全给一人，equal 平分；旧 tiered 订单按冻结权重分配。
+     * 4. 每名打手最终收入 = 自己的基础实得 + tips_by_worker[workerId]；
+     *    个人打赏 100% 归本人，不参与抽成，也不再由双人订单自动平分。
      * 5. 168 元、1档 25%、2档 20% 的 equal 单：两人各分 84 元，
-     *    实得分别为 63 元、67.2 元，俱乐部实得 37.8 元。
+     *    基础实得分别为 63 元、67.2 元，俱乐部实得 37.8 元；若仅给
+     *    1档打手打赏 10 元，最终实得为 73 元、67.2 元，俱乐部仍为 37.8 元。
      */
-    const tipCents = toCents(tip);
+    const normalizedTipsByWorker = normalizeTipsByWorker(
+      order.pricing_snapshot,
+      tipsByWorker,
+    );
+    const totalTip = tipsByWorkerTotal(normalizedTipsByWorker);
     const settlement = calculateSettlement(
       order.pricing_snapshot,
-      fromCents(tipCents),
+      normalizedTipsByWorker,
       order.order_original_total,
     );
 
@@ -619,7 +633,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
           ? {
               ...candidate,
               status: "completed",
-              tip: fromCents(tipCents),
+              tip: totalTip,
+              tips_by_worker: normalizedTipsByWorker,
               final_club_income: settlement.club_income,
               final_worker_incomes: settlement.worker_incomes,
               completed_at: completedAt,
@@ -640,7 +655,11 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     });
 
     try {
-      const data = await apiRequest({ action: "finish_order", order_id: orderId, tip });
+      const data = await apiRequest({
+        action: "finish_order",
+        order_id: orderId,
+        tips_by_worker: normalizedTipsByWorker,
+      });
       set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
       return data.settlement ?? settlement;
     } catch (error) {

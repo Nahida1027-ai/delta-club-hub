@@ -67,6 +67,8 @@ export interface WorkerIncome {
   amount: number;
 }
 
+export type TipsByWorker = Record<string, number>;
+
 export interface Order {
   id: string;
   menu_item_id: string;
@@ -74,7 +76,10 @@ export interface Order {
   /** 下单时冻结的分配模式；旧单仍可从 pricing_snapshot 回填。 */
   split_type: SplitType;
   status: "active" | "completed";
+  /** 总打赏金额；等于 tips_by_worker 所有金额之和，兼容旧订单展示。 */
   tip: number;
+  /** 每名打手独立获得的打赏；旧订单可能为空对象。 */
+  tips_by_worker: TipsByWorker;
   final_club_income: number | null;
   final_worker_incomes: WorkerIncome[];
   special_requirements: SpecialRequirement[];

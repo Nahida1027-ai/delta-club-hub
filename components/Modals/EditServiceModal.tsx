@@ -590,7 +590,7 @@ function buildPreview(item: PriceMenuItem) {
         tiered_ratios: item.tiered_ratios,
         payout_weights: payoutWeights,
       },
-      0,
+      {},
       item.base_price,
     );
     return {

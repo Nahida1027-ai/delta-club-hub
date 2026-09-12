@@ -33,6 +33,7 @@ export const orders = sqliteTable(
     splitType: text("split_type").notNull().default("single"),
     status: text("status").notNull(),
     tipCents: integer("tip_cents").notNull().default(0),
+    tipsByWorkerJson: text("tips_by_worker_json").notNull().default("{}"),
     finalClubIncomeCents: integer("final_club_income_cents"),
     finalWorkerIncomesJson: text("final_worker_incomes_json").notNull().default("[]"),
     specialRequirementsJson: text("special_requirements_json").notNull().default("[]"),

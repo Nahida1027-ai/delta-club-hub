@@ -93,10 +93,17 @@ import type {
   Order,
   PriceMenuItem,
   SettlementResult,
+  TipsByWorker,
   Worker,
   WorkerTier,
 } from "@/lib/club-types";
-import { calculateSettlement, splitLabel } from "@/lib/settlement";
+import {
+  calculateSettlement,
+  orderTipTotal,
+  resolveOrderTipsByWorker,
+  splitLabel,
+  tipsByWorkerTotal,
+} from "@/lib/settlement";
 import { useClubStore } from "@/store/use-club-store";
 import { useClubWebMcp } from "@/hooks/use-club-webmcp";
 
@@ -967,17 +974,40 @@ function FinishOrderDialog({
 }) {
   const finishOrder = useClubStore((state) => state.finishOrder);
   const isMutating = useClubStore((state) => state.is_mutating);
-  const [tipInput, setTipInput] = useState("0");
+  const [tipInputs, setTipInputs] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      (order?.pricing_snapshot.payout_weights ?? []).map((weight) => [
+        weight.workerId,
+        "0",
+      ]),
+    ),
+  );
 
   if (!order) return null;
-  const tip = Number(tipInput);
+  const tipsByWorker: TipsByWorker = {};
+  const inputErrors: Record<string, string> = {};
   let preview: SettlementResult | null = null;
   let errorMessage = "";
+  let totalTip = 0;
   try {
-    if (tipInput.trim() === "" || !/^\d+(\.\d{0,2})?$/.test(tipInput) || tip < 0) {
-      throw new Error("打赏金额需为非负数字，最多两位小数");
+    order.pricing_snapshot.payout_weights.forEach((weight) => {
+      const input = tipInputs[weight.workerId] ?? "0";
+      const amount = Number(input);
+      if (input.trim() === "" || !/^\d+(\.\d{0,2})?$/.test(input) || amount < 0) {
+        inputErrors[weight.workerId] = "请输入非负金额，最多两位小数";
+        return;
+      }
+      tipsByWorker[weight.workerId] = amount;
+    });
+    if (Object.keys(inputErrors).length) {
+      throw new Error("请检查每名打手的打赏金额");
     }
-    preview = calculateSettlement(order.pricing_snapshot, tip, order.order_original_total);
+    totalTip = tipsByWorkerTotal(tipsByWorker);
+    preview = calculateSettlement(
+      order.pricing_snapshot,
+      tipsByWorker,
+      order.order_original_total,
+    );
   } catch (error) {
     errorMessage = error instanceof Error ? error.message : "金额无效";
   }
@@ -985,7 +1015,7 @@ function FinishOrderDialog({
   async function confirm() {
     if (!preview) return;
     try {
-      const result = await finishOrder(order!.id, tip);
+      const result = await finishOrder(order!.id, tipsByWorker);
       toast.success(`结算完成：俱乐部 ${formatMoney(result.club_income)}，打手 ${formatMoney(result.worker_pool)}`);
       onOpenChange(false);
     } catch (error) {
@@ -995,43 +1025,115 @@ function FinishOrderDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="border-white/10 bg-[#171719]/95 text-white shadow-2xl backdrop-blur-xl sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="text-xl">结束订单并结算</DialogTitle>
-          <DialogDescription className="text-white/45">{order.pricing_snapshot.service_name} · #{order.id.slice(0, 8)}</DialogDescription>
-        </DialogHeader>
-        <div>
-          <label htmlFor="tip" className="mb-2 block text-sm font-medium text-white/65">老板打赏金额</label>
-          <div className="relative">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-white/35">¥</span>
-            <Input id="tip" inputMode="decimal" value={tipInput} onChange={(event) => setTipInput(event.target.value)} className={`${inputClass} pl-8`} aria-invalid={Boolean(errorMessage)} />
+      <DialogContent className="overflow-hidden border-white/10 bg-[#171719]/95 p-0 text-white shadow-2xl backdrop-blur-xl sm:max-w-xl">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.94, y: 12 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ type: "spring", stiffness: 300, damping: 26 }}
+          className="grid max-h-[85vh] gap-5 overflow-y-auto p-6"
+        >
+          <DialogHeader>
+            <DialogTitle className="text-xl">结束订单并结算</DialogTitle>
+            <DialogDescription className="text-white/45">订单 #{order.id.slice(0, 8)}</DialogDescription>
+          </DialogHeader>
+
+          <div className="rounded-2xl border border-white/[0.08] bg-white/[0.04] p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="font-medium text-white">{order.pricing_snapshot.service_name}</p>
+                <p className="mt-1 text-sm text-white/40">基础价格与特殊需求加价</p>
+              </div>
+              <p className="shrink-0 text-xl font-semibold tracking-[-0.03em] text-[#64D2FF]">{formatMoney(order.total_price)}</p>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {order.pricing_snapshot.payout_weights.map((weight) => (
+                <span key={weight.workerId} className="inline-flex items-center gap-1.5 rounded-lg bg-black/20 px-2.5 py-1.5 text-sm text-white/65">
+                  {workerName(workers, weight.workerId, order)}
+                  <TierBadge tier={weight.tier} />
+                </span>
+              ))}
+            </div>
           </div>
-          <p className="mt-2 text-[13px] text-[#64D2FF]">打赏不参与抽成，100% 进入打手分配池。</p>
-        </div>
-        <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-black/20">
-          <div className="grid grid-cols-2 divide-x divide-y divide-white/[0.07] border-b border-white/[0.07] sm:grid-cols-4 sm:divide-y-0">
-            <div className="p-3 text-center"><p className="text-[12px] text-white/35">订单原价</p><p className="mt-1 text-sm font-semibold">{formatMoney(order.order_original_total)}</p></div>
-            <div className="p-3 text-center"><p className="text-[12px] text-white/35">特殊加价</p><p className="mt-1 text-sm font-semibold text-[#C4C3FF]">+{formatMoney(order.special_total)}</p></div>
-            <div className="p-3 text-center"><p className="text-[12px] text-white/35">俱乐部</p><p className="mt-1 text-sm font-semibold text-[#64D2FF]">{preview ? formatMoney(preview.club_income) : "—"}</p></div>
-            <div className="p-3 text-center"><p className="text-[12px] text-white/35">打手池</p><p className="mt-1 text-sm font-semibold text-[#5FE778]">{preview ? formatMoney(preview.worker_pool) : "—"}</p></div>
+
+          <div>
+            <div className="mb-3 flex items-end justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium text-white/75">按打手设置打赏</p>
+                <p className="mt-1 text-[13px] text-white/38">打赏 100% 归对应打手，不参与俱乐部抽成。</p>
+              </div>
+            </div>
+            <div className="space-y-2.5">
+              {order.pricing_snapshot.payout_weights.map((weight, index) => (
+                <motion.div
+                  key={weight.workerId}
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: index * 0.05 }}
+                  className="grid gap-3 rounded-2xl border border-white/[0.07] bg-black/20 p-3 sm:grid-cols-[1fr_180px] sm:items-start"
+                >
+                  <div className="flex min-w-0 items-center gap-3 py-1">
+                    <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-[#007AFF]/12 font-semibold text-[#64D2FF]">
+                      {workerName(workers, weight.workerId, order).slice(0, 1)}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-white">{workerName(workers, weight.workerId, order)}</p>
+                      <div className="mt-1 flex items-center gap-2"><TierBadge tier={weight.tier} /><span className="text-[12px] text-white/30">基础份额 {weight.weight}%</span></div>
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor={`tip-${weight.workerId}`} className="mb-1.5 block text-[12px] text-white/45">打赏金额（元）</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-white/35">¥</span>
+                      <Input
+                        id={`tip-${weight.workerId}`}
+                        inputMode="decimal"
+                        value={tipInputs[weight.workerId] ?? "0"}
+                        onChange={(event) => setTipInputs((current) => ({ ...current, [weight.workerId]: event.target.value }))}
+                        className={`${inputClass} pl-8`}
+                        aria-invalid={Boolean(inputErrors[weight.workerId])}
+                      />
+                    </div>
+                    {inputErrors[weight.workerId] ? <p className="mt-1.5 text-[12px] text-[#FF6961]">{inputErrors[weight.workerId]}</p> : null}
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+            <div className="mt-3 flex items-center justify-between rounded-2xl border border-[#FF9F0A]/18 bg-[#FF9F0A]/[0.07] px-4 py-3">
+              <span className="text-sm text-white/55">总打赏</span>
+              <span className="text-lg font-semibold text-[#FFB65C]">
+                <AnimatedNumber value={errorMessage ? 0 : totalTip} formatter={formatMoney} />
+              </span>
+            </div>
           </div>
-          <div className="divide-y divide-white/[0.06]">
-            {order.pricing_snapshot.payout_weights.map((weight) => {
-              const income = preview?.worker_incomes.find((item) => item.workerId === weight.workerId);
-              return (
-                <div key={weight.workerId} className="flex items-center justify-between gap-4 px-4 py-3 text-sm">
-                  <span className="flex items-center gap-2 text-white/60">{workerName(workers, weight.workerId, order)}<TierBadge tier={weight.tier} /><span className="text-white/30">{weight.weight}%</span></span>
-                  <span className="font-semibold text-white">{income ? formatMoney(income.amount) : "—"}</span>
-                </div>
-              );
-            })}
+
+          <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-black/20">
+            <div className="grid grid-cols-2 divide-x divide-white/[0.07] border-b border-white/[0.07]">
+              <div className="p-3 text-center"><p className="text-[12px] text-white/35">俱乐部实得</p><p className="mt-1 text-sm font-semibold text-[#64D2FF]">{preview ? formatMoney(preview.club_income) : "—"}</p></div>
+              <div className="p-3 text-center"><p className="text-[12px] text-white/35">打手最终合计</p><p className="mt-1 text-sm font-semibold text-[#5FE778]">{preview ? formatMoney(preview.worker_pool) : "—"}</p></div>
+            </div>
+            <div className="divide-y divide-white/[0.06]">
+              {order.pricing_snapshot.payout_weights.map((weight) => {
+                const income = preview?.worker_incomes.find((item) => item.workerId === weight.workerId);
+                const personalTip = tipsByWorker[weight.workerId] ?? 0;
+                const baseIncome = income ? Number((income.amount - personalTip).toFixed(2)) : null;
+                return (
+                  <div key={weight.workerId} className="flex items-center justify-between gap-4 px-4 py-3 text-sm">
+                    <span className="flex items-center gap-2 text-white/60">{workerName(workers, weight.workerId, order)}<TierBadge tier={weight.tier} /></span>
+                    <span className="text-right">
+                      <span className="block font-semibold text-white">{income ? formatMoney(income.amount) : "—"}</span>
+                      <span className="mt-0.5 block text-[11px] text-white/32">{baseIncome === null ? "—" : `${formatMoney(baseIncome)} + 打赏 ${formatMoney(personalTip)}`}</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
-        {errorMessage ? <p className="text-sm text-[#FF6961]">{errorMessage}</p> : null}
-        <DialogFooter>
-          <Button variant="ghost" className="h-11 rounded-xl text-white/60 hover:bg-white/[0.06] hover:text-white" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button className="h-11 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]" disabled={!preview || isMutating} onClick={confirm}>{isMutating ? "正在落账…" : "确认结算"}</Button>
-        </DialogFooter>
+          {errorMessage ? <p className="text-sm text-[#FF6961]">{errorMessage}</p> : null}
+          <DialogFooter>
+            <Button variant="ghost" className="h-11 rounded-xl text-white/60 hover:bg-white/[0.06] hover:text-white" onClick={() => onOpenChange(false)}>取消</Button>
+            <Button className="h-11 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]" disabled={!preview || isMutating} onClick={confirm}>{isMutating ? "正在落账…" : "确认结束"}</Button>
+          </DialogFooter>
+        </motion.div>
       </DialogContent>
     </Dialog>
   );
@@ -1176,6 +1278,8 @@ function OrderHistoryItem({
   onDelete: (order: Order) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const tipsByWorker = resolveOrderTipsByWorker(order);
+  const totalTip = orderTipTotal(order);
   const commissionText = order.pricing_snapshot.commission_mode === "by_tier"
     ? `档位抽成 1档 ${order.pricing_snapshot.tier_commission_rates["1档"]}% / 2档 ${order.pricing_snapshot.tier_commission_rates["2档"]}% / 3档 ${order.pricing_snapshot.tier_commission_rates["3档"]}%`
     : `统一抽成 ${order.pricing_snapshot.club_commission_rate}%`;
@@ -1229,7 +1333,7 @@ function OrderHistoryItem({
                   <span>基础价格</span><span className="text-right text-white/75">{formatMoney(order.base_price_snapshot)}</span>
                   <span>特殊需求加价</span><span className="text-right text-[#C4C3FF]">+{formatMoney(order.special_total)}</span>
                   <span>订单总价</span><span className="text-right font-medium text-white">{formatMoney(order.total_price)}</span>
-                  <span>打赏</span><span className="text-right text-[#FFB65C]">+{formatMoney(order.tip)}</span>
+                  <span>打赏</span><span className="text-right text-[#FFB65C]">+{formatMoney(totalTip)}</span>
                   <span>俱乐部实得</span><span className="text-right text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</span>
                 </div>
                 <div className="mt-3 border-t border-white/[0.06] pt-3">
@@ -1248,14 +1352,32 @@ function OrderHistoryItem({
                   )}
                 </div>
                 <div className="mt-3 border-t border-white/[0.06] pt-3">
-                  <p className="mb-2 text-white/40">打手实得</p>
+                  <p className="mb-2 text-white/40">打赏明细</p>
                   <div className="space-y-1.5">
-                    {order.final_worker_incomes.map((income) => (
-                      <div key={income.workerId} className="flex justify-between gap-3 text-white/65">
-                        <span>{workerName(workers, income.workerId, order)}</span>
-                        <span className="font-medium text-[#5FE778]">{formatMoney(income.amount)}</span>
+                    {order.pricing_snapshot.payout_weights.map((weight) => (
+                      <div key={weight.workerId} className="flex justify-between gap-3 text-white/65">
+                        <span>{workerName(workers, weight.workerId, order)}</span>
+                        <span className="font-medium text-[#FFB65C]">+{formatMoney(tipsByWorker[weight.workerId] ?? 0)}</span>
                       </div>
                     ))}
+                  </div>
+                </div>
+                <div className="mt-3 border-t border-white/[0.06] pt-3">
+                  <p className="mb-2 text-white/40">打手最终实得</p>
+                  <div className="space-y-1.5">
+                    {order.final_worker_incomes.map((income) => {
+                      const personalTip = tipsByWorker[income.workerId] ?? 0;
+                      const baseIncome = Number((income.amount - personalTip).toFixed(2));
+                      return (
+                        <div key={income.workerId} className="flex items-start justify-between gap-3 text-white/65">
+                          <span>{workerName(workers, income.workerId, order)}</span>
+                          <span className="text-right">
+                            <span className="block font-medium text-[#5FE778]">{formatMoney(income.amount)}</span>
+                            <span className="mt-0.5 block text-[11px] text-white/30">基础 {formatMoney(baseIncome)} + 打赏 {formatMoney(personalTip)}</span>
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </div>
@@ -1272,7 +1394,7 @@ function OrderHistoryItem({
           ))}
         </div>
       </TableCell>
-      <TableCell className="py-4 text-right text-white/65">{formatMoney(order.tip)}</TableCell>
+      <TableCell className="py-4 text-right text-white/65">{formatMoney(totalTip)}</TableCell>
       <TableCell className="py-4 text-right font-semibold text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</TableCell>
       <TableCell className="py-4 pr-5 text-right sm:pr-6">
         <Button
@@ -1311,7 +1433,7 @@ function HistoryPanel({
     (sum, order) => sum + order.final_worker_incomes.reduce((inner, income) => inner + income.amount, 0),
     0,
   );
-  const tips = completed.reduce((sum, order) => sum + order.tip, 0);
+  const tips = completed.reduce((sum, order) => sum + orderTipTotal(order), 0);
 
   async function confirmDeleteOrder() {
     if (!deletingOrder) return;

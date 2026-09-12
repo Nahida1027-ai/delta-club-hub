@@ -9,6 +9,7 @@ import type {
   SplitType,
   TierCommissionRates,
   TieredRatios,
+  TipsByWorker,
   Worker,
   WorkerIncome,
   WorkerTier,
@@ -18,8 +19,11 @@ import {
   calculateSettlement,
   defaultTierCommissionRates,
   fromCents,
+  legacyTipsByWorker,
   normalizeSpecialRequirements,
+  normalizeTipsByWorker,
   specialRequirementsTotal,
+  tipsByWorkerTotal,
   toCents,
   validateMenuRule,
 } from "@/lib/settlement";
@@ -53,6 +57,7 @@ interface OrderRow {
   split_type: SplitType;
   status: "active" | "completed";
   tip_cents: number;
+  tips_by_worker_json: string;
   final_club_income_cents: number | null;
   final_worker_incomes_json: string;
   special_requirements_json: string;
@@ -122,6 +127,19 @@ function parseSpecialRequirements(value: unknown) {
 
 function parseStoredSpecialRequirements(json: string) {
   return parseSpecialRequirements(JSON.parse(json) as unknown);
+}
+
+function parseStoredTipsByWorker(
+  json: string,
+  snapshot: OrderPricingSnapshot,
+): TipsByWorker {
+  const parsed = JSON.parse(json || "{}") as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("订单按打手打赏数据无效");
+  }
+  return Object.keys(parsed).length
+    ? normalizeTipsByWorker(snapshot, parsed)
+    : {};
 }
 
 function orderAmountsFromRow(row: OrderRow, snapshot: OrderPricingSnapshot) {
@@ -235,7 +253,7 @@ async function readClubData(): Promise<ClubData> {
   const [workerResult, menuResult, orderResult] = await Promise.all([
     db.prepare("SELECT id, name, tier, status, total_completed_orders FROM workers ORDER BY tier, name").all<WorkerRow>(),
     db.prepare("SELECT id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu ORDER BY id").all<MenuRow>(),
-    db.prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders ORDER BY created_at DESC").all<OrderRow>(),
+    db.prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders ORDER BY created_at DESC").all<OrderRow>(),
   ]);
 
   const workers: Worker[] = workerResult.results.map((row) => ({ ...row }));
@@ -253,13 +271,18 @@ async function readClubData(): Promise<ClubData> {
   const orders: Order[] = orderResult.results.map((row) => {
     const pricingSnapshot = parsePricingSnapshot(row.pricing_snapshot_json);
     const amounts = orderAmountsFromRow(row, pricingSnapshot);
+    const assignedWorkerIds = JSON.parse(row.assigned_worker_ids_json) as string[];
     return {
       id: row.id,
       menu_item_id: row.menu_item_id,
-      assigned_worker_ids: JSON.parse(row.assigned_worker_ids_json),
+      assigned_worker_ids: assignedWorkerIds,
       split_type: row.split_type ?? pricingSnapshot.split_type,
       status: row.status,
       tip: fromCents(row.tip_cents),
+      tips_by_worker: parseStoredTipsByWorker(
+        row.tips_by_worker_json,
+        pricingSnapshot,
+      ),
       final_club_income:
         row.final_club_income_cents === null ? null : fromCents(row.final_club_income_cents),
       final_worker_incomes: JSON.parse(row.final_worker_incomes_json) as WorkerIncome[],
@@ -478,13 +501,15 @@ export async function POST(request: Request) {
     if (action === "delete_historical_order") {
       const orderId = String(payload.order_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "completed") {
         return Response.json({ error: "只允许删除已完成的历史订单" }, { status: 409 });
       }
 
+      // final_worker_incomes 已含每人的基础工资与个人打赏，整行删除后收入、
+      // 总支出、排行榜与俱乐部抽成都将由剩余订单重新汇总。
       const [deleteResult] = await db.batch([
         db.prepare("DELETE FROM orders WHERE id = ? AND status = 'completed'").bind(orderId),
         db.prepare("UPDATE workers SET total_completed_orders = (SELECT COUNT(*) FROM orders AS completed_order WHERE completed_order.status = 'completed' AND EXISTS (SELECT 1 FROM json_each(completed_order.assigned_worker_ids_json) AS assigned WHERE assigned.value = workers.id))"),
@@ -507,7 +532,7 @@ export async function POST(request: Request) {
       }
 
       const orderResult = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders")
         .all<OrderRow>();
       const relatedOrders = orderResult.results.filter((order) =>
         (JSON.parse(order.assigned_worker_ids_json) as string[]).includes(workerId),
@@ -518,6 +543,8 @@ export async function POST(request: Request) {
 
       const statements = [];
       if (relatedOrders.length) {
+        // 删除关联订单会一并移除 final_worker_incomes、tips_by_worker_json 与
+        // final_club_income；共享订单中其他打手的业绩随后也会按剩余订单重算。
         const placeholders = relatedOrders.map(() => "?").join(", ");
         statements.push(
           db
@@ -542,7 +569,7 @@ export async function POST(request: Request) {
       const orderId = String(payload.order_id ?? "");
       const oldWorkerId = String(payload.old_worker_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "active") {
@@ -603,7 +630,7 @@ export async function POST(request: Request) {
         try {
           calculateSettlement(
             candidateSnapshot,
-            0,
+            {},
             fromCents(amounts.orderOriginalTotalCents),
           );
           return true;
@@ -638,7 +665,7 @@ export async function POST(request: Request) {
       // 换人后仍沿用原订单冻结的价格与抽成规则，只根据新打手快照档位取档位抽成。
       calculateSettlement(
         newSnapshot,
-        0,
+        {},
         fromCents(amounts.orderOriginalTotalCents),
       );
       const createdAt = new Date().toISOString();
@@ -811,7 +838,7 @@ export async function POST(request: Request) {
         payout_weights: payoutWeights,
       };
       // 服务端权威校验本次实际打手组合与冻结后的结算规则。
-      calculateSettlement(snapshot, 0, totalPrice);
+      calculateSettlement(snapshot, {}, totalPrice);
       const orderId = crypto.randomUUID();
       const createdAt = new Date().toISOString();
       const idleCheck = `SELECT COUNT(*) FROM workers WHERE id IN (${placeholders}) AND status = 'idle'`;
@@ -842,10 +869,8 @@ export async function POST(request: Request) {
 
     if (action === "finish_order") {
       const orderId = String(payload.order_id ?? "");
-      const tip = Number(payload.tip ?? 0);
-      toCents(tip);
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "active") {
@@ -854,19 +879,26 @@ export async function POST(request: Request) {
 
       const snapshot = parsePricingSnapshot(row.pricing_snapshot_json);
       const amounts = orderAmountsFromRow(row, snapshot);
+      // 新客户端传 tips_by_worker；保留旧 tip 请求的按冻结权重回退，仅用于兼容。
+      const tipsByWorker = payload.tips_by_worker === undefined
+        ? legacyTipsByWorker(snapshot, Number(payload.tip ?? 0))
+        : normalizeTipsByWorker(snapshot, payload.tips_by_worker);
+      const totalTip = tipsByWorkerTotal(tipsByWorker);
       /*
        * finishOrder 权威公式（整数分）：
        * 1. 订单总价 = 基础价快照 + 特殊需求加价，两部分都参与抽成。
        * 2. single：打手实得 = 订单总价 × (1 - 该打手档位抽成率)。
        * 3. equal：每人先分订单总价的 1/2，再分别扣除自己档位对应的抽成；
        *    俱乐部实得 = 订单总价 - A 基础实得 - B 基础实得。
-       * 4. 打赏不参与抽成：single 全给一人，equal 平分；旧 tiered 单按冻结权重分配。
+       * 4. 每名打手最终收入 = 自己的基础实得 + tips_by_worker[workerId]；
+       *    打赏 100% 归该打手，不参与抽成，双人订单不再自动平分新打赏。
        * 5. 样例：168 元 equal 单，1档 25%、2档 20%，两人各自基数为 84 元，
-       *    实得 63 元和 67.2 元，俱乐部实得 37.8 元。
+       *    基础实得 63 元和 67.2 元；若仅给 1档打手 10 元打赏，最终实得
+       *    73 元和 67.2 元，俱乐部仍实得 37.8 元。
        */
       const settlement = calculateSettlement(
         snapshot,
-        tip,
+        tipsByWorker,
         fromCents(amounts.orderOriginalTotalCents),
       );
       const workerIds = JSON.parse(row.assigned_worker_ids_json) as string[];
@@ -874,7 +906,7 @@ export async function POST(request: Request) {
       const completedAt = new Date().toISOString();
       const settlementToken = crypto.randomUUID();
       const [finishResult] = await db.batch([
-        db.prepare("UPDATE orders SET status = 'completed', tip_cents = ?, final_club_income_cents = ?, final_worker_incomes_json = ?, completed_at = ?, settlement_token = ? WHERE id = ? AND status = 'active'").bind(toCents(tip), toCents(settlement.club_income), JSON.stringify(settlement.worker_incomes), completedAt, settlementToken, orderId),
+        db.prepare("UPDATE orders SET status = 'completed', tip_cents = ?, tips_by_worker_json = ?, final_club_income_cents = ?, final_worker_incomes_json = ?, completed_at = ?, settlement_token = ? WHERE id = ? AND status = 'active'").bind(toCents(totalTip), JSON.stringify(tipsByWorker), toCents(settlement.club_income), JSON.stringify(settlement.worker_incomes), completedAt, settlementToken, orderId),
         db.prepare(`UPDATE workers SET status = 'idle', total_completed_orders = total_completed_orders + 1 WHERE id IN (${placeholders}) AND EXISTS (SELECT 1 FROM orders WHERE id = ? AND settlement_token = ?)`).bind(...workerIds, orderId, settlementToken),
       ]);
       if (!finishResult.meta.changes) {

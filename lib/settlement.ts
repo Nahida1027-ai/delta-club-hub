@@ -1,5 +1,6 @@
 import type {
   CommissionMode,
+  Order,
   OrderPricingSnapshot,
   PayoutWeight,
   SettlementResult,
@@ -7,6 +8,7 @@ import type {
   SplitType,
   TierCommissionRates,
   TieredRatios,
+  TipsByWorker,
   Worker,
   WorkerTier,
 } from "@/lib/club-types";
@@ -208,14 +210,95 @@ function allocateCentsByWeight(totalCents: number, weights: PayoutWeight[]) {
   return weighted.map((entry) => entry.cents);
 }
 
-export function calculateSettlement(
+function sumTipCents(tipsByWorker: TipsByWorker) {
+  const totalCents = Object.values(tipsByWorker).reduce(
+    (sum, amount) => sum + toCents(amount),
+    0,
+  );
+  if (!Number.isSafeInteger(totalCents) || totalCents > MAX_MONEY_CENTS) {
+    throw new Error("打赏合计超出安全范围");
+  }
+  return totalCents;
+}
+
+/**
+ * 只接受当前订单参与打手的打赏，并将遗漏的打手补为 0。
+ * 所有金额都先转为整数分再返回，避免浮点金额进入结算。
+ */
+export function normalizeTipsByWorker(
+  snapshot: OrderPricingSnapshot,
+  value: unknown,
+): TipsByWorker {
+  const input = value ?? {};
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("按打手打赏格式无效");
+  }
+
+  const workerIds = snapshot.payout_weights.map((entry) => entry.workerId);
+  const allowedWorkerIds = new Set(workerIds);
+  if (allowedWorkerIds.size !== workerIds.length) {
+    throw new Error("订单包含重复打手，无法结算");
+  }
+
+  const rawTips = input as Record<string, unknown>;
+  for (const workerId of Object.keys(rawTips)) {
+    if (!allowedWorkerIds.has(workerId)) {
+      throw new Error("只能给本订单参与打手设置打赏");
+    }
+  }
+
+  const normalized = Object.fromEntries(
+    workerIds.map((workerId) => [
+      workerId,
+      fromCents(toCents(Number(rawTips[workerId] ?? 0))),
+    ]),
+  ) as TipsByWorker;
+  sumTipCents(normalized);
+  return normalized;
+}
+
+export function tipsByWorkerTotal(tipsByWorker: TipsByWorker) {
+  return fromCents(sumTipCents(tipsByWorker));
+}
+
+/** 仅用于没有 tips_by_worker 的历史订单，复现旧版按冻结权重拆分总打赏的展示。 */
+export function legacyTipsByWorker(
   snapshot: OrderPricingSnapshot,
   tip: number,
+): TipsByWorker {
+  const shares = allocateCentsByWeight(toCents(tip), snapshot.payout_weights);
+  return Object.fromEntries(
+    snapshot.payout_weights.map((entry, index) => [
+      entry.workerId,
+      fromCents(shares[index]),
+    ]),
+  ) as TipsByWorker;
+}
+
+export function resolveOrderTipsByWorker(
+  order: Pick<Order, "pricing_snapshot" | "tip" | "tips_by_worker">,
+): TipsByWorker {
+  const explicitTips = order.tips_by_worker ?? {};
+  return Object.keys(explicitTips).length
+    ? normalizeTipsByWorker(order.pricing_snapshot, explicitTips)
+    : legacyTipsByWorker(order.pricing_snapshot, order.tip);
+}
+
+export function orderTipTotal(
+  order: Pick<Order, "pricing_snapshot" | "tip" | "tips_by_worker">,
+) {
+  return tipsByWorkerTotal(resolveOrderTipsByWorker(order));
+}
+
+export function calculateSettlement(
+  snapshot: OrderPricingSnapshot,
+  tipsByWorker: TipsByWorker,
   orderOriginalTotal = snapshot.base_price,
 ): SettlementResult {
   const originalTotalCents = toCents(orderOriginalTotal);
-  const tipCents = toCents(tip);
   if (!snapshot.payout_weights.length) throw new Error("订单没有可结算的打手");
+  const normalizedTips = normalizeTipsByWorker(snapshot, tipsByWorker);
+  const tipCents = sumTipCents(normalizedTips);
 
   const totalPoolCents = originalTotalCents + tipCents;
   if (!Number.isSafeInteger(totalPoolCents) || totalPoolCents > MAX_MONEY_CENTS) {
@@ -231,18 +314,17 @@ export function calculateSettlement(
    * 1. 先按 split 权重拆分订单原始总价；single 为 100%，equal 为 50% / 50%。
    * 2. 每名打手实得基础收入 = 自己的订单份额 × (1 - 自己档位的抽成率)。
    * 3. 俱乐部抽成 = 每名打手订单份额对应的抽成之和。
-   * 4. 打赏另行按同一权重分配，不参与任何抽成。
+   * 4. 每名打手最终收入 = 基础收入 + tips_by_worker[workerId]；个人打赏不参与抽成。
    *
    * 168 元 equal 示例：1档 25%、2档 20%。两人的订单份额均为 84 元，
    * 1档实得 84 × 75% = 63 元，2档实得 84 × 80% = 67.2 元，
-   * 俱乐部实得 168 - 63 - 67.2 = 37.8 元。
+   * 俱乐部实得 168 - 63 - 67.2 = 37.8 元。若只给 1档打手打赏 10 元，
+   * 两人最终收入分别为 73 元、67.2 元，俱乐部仍实得 37.8 元。
    */
   const originalShares = allocateCentsByWeight(
     originalTotalCents,
     snapshot.payout_weights,
   );
-  const tipShares = allocateCentsByWeight(tipCents, snapshot.payout_weights);
-
   let clubIncomeCents = 0;
   const workerIncomes = snapshot.payout_weights.map((entry, index) => {
     const rate = getCommissionRate(snapshot, entry.tier);
@@ -258,7 +340,10 @@ export function calculateSettlement(
     clubIncomeCents += commissionCents;
     return {
       workerId: entry.workerId,
-      cents: originalShares[index] - commissionCents + tipShares[index],
+      cents:
+        originalShares[index] -
+        commissionCents +
+        toCents(normalizedTips[entry.workerId] ?? 0),
     };
   });
   if (!Number.isSafeInteger(clubIncomeCents)) {

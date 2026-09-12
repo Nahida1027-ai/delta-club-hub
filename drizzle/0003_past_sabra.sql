@@ -1,0 +1,1 @@
+ALTER TABLE `orders` ADD `tips_by_worker_json` text DEFAULT '{}' NOT NULL;

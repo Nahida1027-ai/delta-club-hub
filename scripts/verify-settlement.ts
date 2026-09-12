@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import type {
   CommissionMode,
+  Order,
   OrderPricingSnapshot,
   PayoutWeight,
   SplitType,
@@ -11,6 +12,7 @@ import type {
 import {
   calculateSettlement,
   normalizeSpecialRequirements,
+  resolveOrderTipsByWorker,
   specialRequirementsTotal,
 } from "../lib/settlement";
 
@@ -58,43 +60,43 @@ const worker = (
 
 const cases = [
   {
-    name: "single: 打赏免抽成",
-    result: calculateSettlement(snapshot(200, 30, [worker("A", 100)]), 20),
+    name: "single: 个人打赏免抽成",
+    result: calculateSettlement(snapshot(200, 30, [worker("A", 100)]), { A: 20 }),
     expected: { club: 60, workers: [160] },
   },
   {
-    name: "equal: 两人平分",
-    result: calculateSettlement(snapshot(200, 10, [worker("A", 50), worker("B", 50)]), 20),
+    name: "equal: 兼容相同的个人打赏",
+    result: calculateSettlement(snapshot(200, 10, [worker("A", 50), worker("B", 50)]), { A: 10, B: 10 }),
     expected: { club: 20, workers: [100, 100] },
   },
   {
-    name: "tiered: 60/40",
-    result: calculateSettlement(snapshot(200, 30, [worker("A", 60), worker("B", 40)]), 20),
+    name: "tiered: 个人打赏互不影响",
+    result: calculateSettlement(snapshot(200, 30, [worker("A", 60), worker("B", 40)]), { A: 12, B: 8 }),
     expected: { club: 60, workers: [96, 64] },
   },
   {
     name: "equal: 奇数分尾差守恒",
-    result: calculateSettlement(snapshot(100.01, 0, [worker("A", 50), worker("B", 50)]), 0),
+    result: calculateSettlement(snapshot(100.01, 0, [worker("A", 50), worker("B", 50)]), {}),
     expected: { club: 0, workers: [50.01, 50] },
   },
   {
     name: "tiered: 尾差守恒",
-    result: calculateSettlement(snapshot(83.33, 0, [worker("A", 60), worker("B", 40)]), 0),
+    result: calculateSettlement(snapshot(83.33, 0, [worker("A", 60), worker("B", 40)]), {}),
     expected: { club: 0, workers: [50, 33.33] },
   },
   {
     name: "小数抽成",
-    result: calculateSettlement(snapshot(10.01, 33.33, [worker("A", 100)]), 0.02),
+    result: calculateSettlement(snapshot(10.01, 33.33, [worker("A", 100)]), { A: 0.02 }),
     expected: { club: 3.34, workers: [6.69] },
   },
   {
     name: "100% 抽成时打赏仍归打手",
-    result: calculateSettlement(snapshot(199.99, 100, [worker("A", 100)]), 10.01),
+    result: calculateSettlement(snapshot(199.99, 100, [worker("A", 100)]), { A: 10.01 }),
     expected: { club: 199.99, workers: [10.01] },
   },
   {
     name: "uniform: 特殊需求参与抽成，打赏免抽成",
-    result: calculateSettlement(snapshot(100, 10, [worker("A", 100)]), 20, 130),
+    result: calculateSettlement(snapshot(100, 10, [worker("A", 100)]), { A: 20 }, 130),
     expected: { club: 13, workers: [137] },
   },
   {
@@ -104,7 +106,7 @@ const cases = [
         commissionMode: "by_tier",
         tierRates: { "1档": 10, "2档": 15, "3档": 20 },
       }),
-      0,
+      {},
       130,
     ),
     expected: { club: 13, workers: [117] },
@@ -116,7 +118,7 @@ const cases = [
         commissionMode: "by_tier",
         tierRates: { "1档": 10, "2档": 20, "3档": 0 },
       }),
-      0,
+      {},
       130,
     ),
     expected: { club: 19.5, workers: [58.5, 52] },
@@ -130,7 +132,7 @@ const cases = [
         splitType: "tiered",
         tieredRatios: { "1档": 60, "2档": 40 },
       }),
-      0,
+      {},
       130,
     ),
     expected: { club: 18.2, workers: [70.2, 41.6] },
@@ -147,31 +149,31 @@ const cases = [
           tierRates: { "1档": 0, "2档": 15, "3档": 0 },
         },
       ),
-      0,
+      {},
     ),
     expected: { club: 15, workers: [42.5, 42.5] },
   },
   {
-    name: "by-tier equal: 各自抽成后打赏仍完整平分",
+    name: "by-tier equal: 两名打手的个人打赏分别入账",
     result: calculateSettlement(
       snapshot(100, 0, [worker("A", 50), worker("B", 50)], {
         commissionMode: "by_tier",
         tierRates: { "1档": 40, "2档": 60, "3档": 0 },
       }),
-      10,
+      { A: 5, B: 5 },
     ),
     expected: { club: 50, workers: [35, 25] },
   },
   {
-    name: "验收样例: 168 元、1档 25%、2档 20%",
+    name: "验收样例: 168 元且只给 1档打手 10 元打赏",
     result: calculateSettlement(
       snapshot(168, 0, [worker("A", 50), worker("B", 50)], {
         commissionMode: "by_tier",
         tierRates: { "1档": 25, "2档": 20, "3档": 15 },
       }),
-      0,
+      { A: 10, B: 0 },
     ),
-    expected: { club: 37.8, workers: [63, 67.2] },
+    expected: { club: 37.8, workers: [73, 67.2] },
   },
 ];
 
@@ -197,10 +199,28 @@ assert.throws(
         commissionMode: "by_tier",
         tierRates: { "1档": -1, "2档": 20, "3档": 0 },
       }),
-      0,
+      {},
     ),
   /俱乐部抽成比例无效/,
   "by-tier: 负数抽成必须拒绝",
+);
+assert.throws(
+  () =>
+    calculateSettlement(
+      snapshot(100, 10, [worker("A", 100)]),
+      { A: -0.01 },
+    ),
+  /金额必须是非负数字/,
+  "个人打赏不能为负数",
+);
+assert.throws(
+  () =>
+    calculateSettlement(
+      snapshot(100, 10, [worker("A", 100)]),
+      { B: 10 },
+    ),
+  /只能给本订单参与打手设置打赏/,
+  "不能给订单外打手设置打赏",
 );
 
 const normalizedRequirements = normalizeSpecialRequirements([
@@ -231,6 +251,22 @@ assert.throws(
   "特殊需求加价不能为负数",
 );
 
+const legacyOrder = {
+  pricing_snapshot: snapshot(168, 0, [worker("A", 50), worker("B", 50)]),
+  tip: 10,
+  tips_by_worker: {},
+} as Order;
+assert.deepEqual(
+  resolveOrderTipsByWorker(legacyOrder),
+  { A: 5, B: 5 },
+  "没有 tips_by_worker 的旧双人订单应按原规则回退平分总打赏",
+);
+assert.deepEqual(
+  resolveOrderTipsByWorker({ ...legacyOrder, tips_by_worker: { A: 10, B: 0 } }),
+  { A: 10, B: 0 },
+  "新订单必须优先使用每名打手的独立打赏",
+);
+
 console.log(
-  `Settlement verification passed: ${cases.length} settlement scenarios + 5 validation assertions.`,
+  `Settlement verification passed: ${cases.length} settlement scenarios + 9 validation assertions.`,
 );

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import type { SpecialRequirement } from "@/lib/club-types";
+import type { SpecialRequirement, TipsByWorker } from "@/lib/club-types";
 import { useClubStore } from "@/store/use-club-store";
 
 function objectInput(input: unknown): Record<string, unknown> {
@@ -134,25 +134,42 @@ export function useClubWebMcp() {
           {
             name: "finish_club_order",
             title: "结束并结算订单",
-            description: "结束一张进行中订单，记录老板打赏，自动拆分俱乐部与打手收入并释放全部打手。",
+            description: "结束一张进行中订单，为每名参与打手分别记录打赏，自动结算并释放全部打手。",
             inputSchema: {
               type: "object",
               properties: {
                 orderId: { type: "string", description: "进行中订单 ID" },
-                tip: { type: "number", minimum: 0, multipleOf: 0.01, description: "老板打赏金额，单位为元" },
+                tipsByWorker: {
+                  type: "object",
+                  description: "按打手 ID 记录的独立打赏金额；未提供的参与打手按 0 元处理",
+                  additionalProperties: {
+                    type: "number",
+                    minimum: 0,
+                    multipleOf: 0.01,
+                  },
+                },
               },
-              required: ["orderId", "tip"],
+              required: ["orderId", "tipsByWorker"],
               additionalProperties: false,
             },
             annotations: { readOnlyHint: false, untrustedContentHint: false },
             async execute(input) {
               const data = objectInput(input);
-              if (typeof data.orderId !== "string" || typeof data.tip !== "number") {
-                throw new Error("orderId 和 tip 为必填项");
+              if (typeof data.orderId !== "string") {
+                throw new Error("orderId 为必填项");
               }
+              const rawTips = objectInput(data.tipsByWorker);
+              const tipsByWorker = Object.fromEntries(
+                Object.entries(rawTips).map(([workerId, amount]) => {
+                  if (typeof amount !== "number") {
+                    throw new Error("tipsByWorker 的金额必须是数字");
+                  }
+                  return [workerId, amount];
+                }),
+              ) as TipsByWorker;
               const settlement = await useClubStore
                 .getState()
-                .finishOrder(data.orderId, data.tip);
+                .finishOrder(data.orderId, tipsByWorker);
               return {
                 orderId: data.orderId,
                 status: "completed",
