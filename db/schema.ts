@@ -12,7 +12,9 @@ export const workers = sqliteTable("workers", {
 export const priceMenu = sqliteTable("price_menu", {
   id: text("id").primaryKey(),
   serviceName: text("service_name").notNull(),
+  orderType: text("order_type").notNull().default("escort"),
   basePriceCents: integer("base_price_cents").notNull(),
+  hourlyRateCents: integer("hourly_rate_cents").notNull().default(0),
   commissionMode: text("commission_mode").notNull().default("uniform"),
   clubCommissionBps: integer("club_commission_bps").notNull().default(0),
   tierCommissionRatesJson: text("tier_commission_rates_json")
@@ -30,6 +32,9 @@ export const orders = sqliteTable(
     id: text("id").primaryKey(),
     menuItemId: text("menu_item_id").notNull(),
     assignedWorkerIdsJson: text("assigned_worker_ids_json").notNull(),
+    orderType: text("order_type").notNull().default("escort"),
+    hoursHalfUnits: integer("hours_half_units").notNull().default(0),
+    hourlyRateSnapshotCents: integer("hourly_rate_snapshot_cents").notNull().default(0),
     splitType: text("split_type").notNull().default("single"),
     status: text("status").notNull(),
     tipCents: integer("tip_cents").notNull().default(0),

@@ -9,7 +9,7 @@ import {
   useReducedMotion,
   useSpring,
 } from "framer-motion";
-import { Check, Minus, Plus, Sparkles, Trash2 } from "lucide-react";
+import { Check, Clock3, Minus, Plus, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -31,9 +31,12 @@ import type {
 } from "@/lib/club-types";
 import {
   buildPayoutWeights,
+  calculateOrderBasePrice,
   calculateSettlement,
   defaultTierCommissionRates,
   fromCents,
+  normalizeCompanionHours,
+  normalizeOrderType,
   normalizeSpecialRequirements,
   specialRequirementsTotal,
   splitLabel,
@@ -98,6 +101,10 @@ function parsedPrice(input: string) {
   return value;
 }
 
+function formatHours(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
 export function OrderConfirmModal({
   item,
   workers,
@@ -109,7 +116,10 @@ export function OrderConfirmModal({
   const isMutating = useClubStore((state) => state.is_mutating);
   const [selected, setSelected] = useState<string[]>(initialWorkerIds);
   const [requirements, setRequirements] = useState<RequirementDraft[]>([]);
+  const [hoursInput, setHoursInput] = useState("1");
+  const [hoursNotice, setHoursNotice] = useState("");
   const [attempted, setAttempted] = useState(false);
+  const orderType = normalizeOrderType(item?.order_type);
 
   const available = useMemo(
     () =>
@@ -148,8 +158,20 @@ export function OrderConfirmModal({
   let validationMessage = "";
   let normalizedRequirements: SpecialRequirement[] = [];
   let preview: ReturnType<typeof calculateSettlement> | null = null;
+  let orderHours: number | null = null;
+  let basePrice = 0;
+  let hoursError = "";
+  try {
+    orderHours = orderType === "companion"
+      ? normalizeCompanionHours(hoursInput)
+      : null;
+    if (item) basePrice = calculateOrderBasePrice(item, orderHours ?? 1);
+  } catch (error) {
+    hoursError = error instanceof Error ? error.message : "陪玩时长无效";
+  }
   if (item) {
     try {
+      if (hoursError) throw new Error(hoursError);
       if (selectedIds.length !== needed) throw new Error(`请选择 ${needed} 名打手`);
       normalizedRequirements = normalizeSpecialRequirements(
         requirements.map((requirement) => ({
@@ -158,10 +180,12 @@ export function OrderConfirmModal({
         })),
       );
       const specialTotal = specialRequirementsTotal(normalizedRequirements);
-      const originalTotal = fromCents(toCents(item.base_price) + toCents(specialTotal));
+      const originalTotal = fromCents(toCents(basePrice) + toCents(specialTotal));
       const snapshot: OrderPricingSnapshot = {
         service_name: item.service_name,
-        base_price: item.base_price,
+        order_type: orderType,
+        hourly_rate: orderType === "companion" ? item.hourly_rate : 0,
+        base_price: basePrice,
         commission_mode: item.commission_mode ?? "uniform",
         club_commission_rate: item.club_commission_rate,
         tier_commission_rates: {
@@ -205,7 +229,12 @@ export function OrderConfirmModal({
     setAttempted(true);
     if (!preview || validationMessage || requirementErrors.some(Boolean)) return;
     try {
-      const orderId = await createOrder(item!.id, selectedIds, normalizedRequirements);
+      const orderId = await createOrder(
+        item!.id,
+        selectedIds,
+        normalizedRequirements,
+        orderHours ?? undefined,
+      );
       toast.success(`订单 ${orderId.slice(0, 8)} 已开始`);
       onOpenChange(false);
     } catch (error) {
@@ -213,7 +242,18 @@ export function OrderConfirmModal({
     }
   }
 
-  const orderTotal = fromCents(toCents(item.base_price) + toCents(liveSpecialTotal));
+  const orderTotal = fromCents(toCents(basePrice) + toCents(liveSpecialTotal));
+
+  function normalizeHoursOnBlur() {
+    const raw = Number(hoursInput);
+    let corrected = !Number.isFinite(raw) ? 1 : raw;
+    corrected = Math.min(24, Math.max(1, Math.round(corrected * 2) / 2));
+    const correctedText = formatHours(corrected);
+    if (hoursInput.trim() !== correctedText) {
+      setHoursInput(correctedText);
+      setHoursNotice(`时长已自动修正为 ${correctedText} 小时`);
+    }
+  }
 
   return (
     <Dialog
@@ -241,13 +281,67 @@ export function OrderConfirmModal({
 
           <div className="flex items-center justify-between gap-4 rounded-2xl border border-white/[0.08] bg-white/[0.035] p-4">
             <div className="min-w-0">
-              <p className="truncate font-semibold text-white">{item.service_name}</p>
-              <p className="mt-1 text-sm text-white/40">{splitLabel(item.split_type)} · 基础价格</p>
+              <div className="flex items-center gap-2">
+                <p className="truncate font-semibold text-white">{item.service_name}</p>
+                <span className={`shrink-0 rounded-lg px-2 py-1 text-[12px] ${orderType === "companion" ? "bg-[#30D158]/12 text-[#7EF29A]" : "bg-[#007AFF]/12 text-[#64D2FF]"}`}>
+                  {orderType === "companion" ? "陪玩" : "护航"}
+                </span>
+              </div>
+              <p className="mt-1 text-sm text-white/40">{splitLabel(item.split_type)} · {orderType === "companion" ? "按小时计费" : "固定价格"}</p>
             </div>
             <p className="shrink-0 text-xl font-semibold tracking-tight text-white">
-              {formatMoney(item.base_price)}
+              {orderType === "companion" ? `${formatMoney(item.hourly_rate)} / 小时` : formatMoney(item.base_price)}
             </p>
           </div>
+
+          <AnimatePresence initial={false}>
+            {orderType === "companion" ? (
+              <motion.section
+                key="companion-hours"
+                initial={{ opacity: 0, height: 0, y: -8 }}
+                animate={{ opacity: 1, height: "auto", y: 0 }}
+                exit={{ opacity: 0, height: 0, y: -8 }}
+                transition={{ type: "spring", stiffness: 300, damping: 28 }}
+                className="overflow-hidden rounded-2xl border border-[#30D158]/20 bg-[#30D158]/[0.07]"
+              >
+                <div className="grid gap-3 p-4 sm:grid-cols-[1fr_190px] sm:items-center">
+                  <div>
+                    <h3 className="flex items-center gap-2 text-sm font-semibold text-white/80">
+                      <Clock3 className="size-4 text-[#7EF29A]" />陪玩时长（小时）
+                    </h3>
+                    <p className="mt-1 text-xs text-white/35">1–24 小时，按 0.5 小时递增</p>
+                  </div>
+                  <div>
+                    <div className="relative">
+                      <Input
+                        id="companion-hours"
+                        type="number"
+                        inputMode="decimal"
+                        min="1"
+                        max="24"
+                        step="0.5"
+                        value={hoursInput}
+                        onChange={(event) => {
+                          setHoursInput(event.target.value);
+                          setHoursNotice("");
+                        }}
+                        onBlur={normalizeHoursOnBlur}
+                        aria-invalid={Boolean(hoursError)}
+                        aria-describedby={hoursError || hoursNotice ? "companion-hours-message" : undefined}
+                        className={`${inputClass} pr-14 focus-visible:border-[#30D158]/60 focus-visible:ring-[#30D158]/20`}
+                      />
+                      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-white/35">小时</span>
+                    </div>
+                    {hoursError || hoursNotice ? (
+                      <p id="companion-hours-message" className={`mt-1.5 text-[12px] ${hoursError ? "text-[#FF6961]" : "text-[#7EF29A]"}`}>
+                        {hoursError || hoursNotice}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              </motion.section>
+            ) : null}
+          </AnimatePresence>
 
           <section>
             <div className="mb-3 flex items-center justify-between gap-3">
@@ -406,9 +500,21 @@ export function OrderConfirmModal({
 
           <section className="overflow-hidden rounded-2xl border border-[#007AFF]/20 bg-[#007AFF]/[0.07]">
             <div className="space-y-2 p-4 text-sm">
-              <div className="flex items-center justify-between text-white/50">
-                <span>基础价格</span><span>{formatMoney(item.base_price)}</span>
-              </div>
+              {orderType === "companion" ? (
+                <>
+                  <div className="flex items-center justify-between gap-4 text-white/50">
+                    <span>每小时价格 × 时长</span>
+                    <span className="text-right">{formatMoney(item.hourly_rate)} × {orderHours ? formatHours(orderHours) : "—"} 小时</span>
+                  </div>
+                  <div className="flex items-center justify-between text-white/50">
+                    <span>基础价格</span><span><RollingMoney value={basePrice} /></span>
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-center justify-between text-white/50">
+                  <span>基础价格</span><span>{formatMoney(basePrice)}</span>
+                </div>
+              )}
               <div className="flex items-center justify-between text-white/50">
                 <span>特殊需求加价</span><span>+{formatMoney(liveSpecialTotal)}</span>
               </div>

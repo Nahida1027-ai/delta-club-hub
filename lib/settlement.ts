@@ -2,7 +2,9 @@ import type {
   CommissionMode,
   Order,
   OrderPricingSnapshot,
+  OrderType,
   PayoutWeight,
+  PriceMenuItem,
   SettlementResult,
   SpecialRequirement,
   SplitType,
@@ -42,9 +44,56 @@ export function splitLabel(splitType: SplitType): string {
   }[splitType];
 }
 
+export function normalizeOrderType(value: unknown): OrderType {
+  return value === "companion" ? "companion" : "escort";
+}
+
+export function orderTypeLabel(orderType: OrderType): string {
+  return orderType === "companion" ? "陪玩单" : "护航单";
+}
+
+/** 陪玩时长统一限制为 1–24 小时，并严格使用 0.5 小时步进。 */
+export function normalizeCompanionHours(value: unknown): number {
+  const hours = Number(value);
+  if (!Number.isFinite(hours) || hours < 1 || hours > 24) {
+    throw new Error("陪玩时长必须在 1 到 24 小时之间");
+  }
+  const halfHourUnits = Math.round(hours * 2);
+  if (Math.abs(hours * 2 - halfHourUnits) > 0.000001) {
+    throw new Error("陪玩时长必须以 0.5 小时为步进");
+  }
+  return halfHourUnits / 2;
+}
+
+/**
+ * 把服务计价统一转换为本单基础价格。陪玩单先按小时计算并四舍五入到分，
+ * 此后特殊需求、抽成、独立打赏和汇总均继续使用既有金额模型。
+ */
+export function calculateOrderBasePrice(
+  input: Pick<PriceMenuItem, "order_type" | "base_price" | "hourly_rate">,
+  hours = 1,
+): number {
+  if (normalizeOrderType(input.order_type) === "escort") {
+    const basePriceCents = toCents(Number(input.base_price));
+    if (basePriceCents <= 0) throw new Error("基础价格必须大于 0");
+    return fromCents(basePriceCents);
+  }
+
+  const hourlyRateCents = toCents(Number(input.hourly_rate));
+  if (hourlyRateCents <= 0) throw new Error("每小时价格必须大于 0");
+  const halfHourUnits = normalizeCompanionHours(hours) * 2;
+  const basePriceCents = Math.round((hourlyRateCents * halfHourUnits) / 2);
+  if (!Number.isSafeInteger(basePriceCents) || basePriceCents > MAX_MONEY_CENTS) {
+    throw new Error("陪玩单基础价格超出安全范围");
+  }
+  return fromCents(basePriceCents);
+}
+
 export function validateMenuRule(input: {
   service_name: string;
+  order_type?: OrderType;
   base_price: number;
+  hourly_rate?: number;
   commission_mode?: CommissionMode;
   club_commission_rate: number;
   tier_commission_rates?: TierCommissionRates;
@@ -53,7 +102,14 @@ export function validateMenuRule(input: {
   eligible_tiers: WorkerTier[];
 }) {
   if (!input.service_name.trim()) throw new Error("请填写服务名称");
-  toCents(input.base_price);
+  calculateOrderBasePrice(
+    {
+      order_type: normalizeOrderType(input.order_type),
+      base_price: Number(input.base_price),
+      hourly_rate: Number(input.hourly_rate ?? 0),
+    },
+    1,
+  );
   const commissionMode = input.commission_mode ?? "uniform";
   if (!(["uniform", "by_tier"] as CommissionMode[]).includes(commissionMode)) {
     throw new Error("请选择有效抽成模式");

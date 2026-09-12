@@ -10,7 +10,9 @@ import type {
   WorkerTier,
 } from "../lib/club-types";
 import {
+  calculateOrderBasePrice,
   calculateSettlement,
+  normalizeCompanionHours,
   normalizeSpecialRequirements,
   resolveOrderTipsByWorker,
   specialRequirementsTotal,
@@ -37,6 +39,8 @@ function snapshot(
 ): OrderPricingSnapshot {
   return {
     service_name: "验收场景",
+    order_type: "escort",
+    hourly_rate: 0,
     base_price: base,
     commission_mode: options.commissionMode ?? "uniform",
     club_commission_rate: commission,
@@ -175,6 +179,22 @@ const cases = [
     ),
     expected: { club: 37.8, workers: [73, 67.2] },
   },
+  {
+    name: "陪玩验收样例: 100 元/小时 × 2 小时 + 30 元特殊需求",
+    result: calculateSettlement(
+      {
+        ...snapshot(200, 0, [worker("A", 50), worker("B", 50)], {
+          commissionMode: "by_tier",
+          tierRates: { "1档": 25, "2档": 20, "3档": 15 },
+        }),
+        order_type: "companion",
+        hourly_rate: 100,
+      },
+      {},
+      230,
+    ),
+    expected: { club: 51.75, workers: [86.25, 92] },
+  },
 ];
 
 for (const scenario of cases) {
@@ -266,7 +286,33 @@ assert.deepEqual(
   { A: 10, B: 0 },
   "新订单必须优先使用每名打手的独立打赏",
 );
+assert.equal(
+  calculateOrderBasePrice(
+    { order_type: "companion", base_price: 0, hourly_rate: 100 },
+    1.5,
+  ),
+  150,
+  "陪玩单基础价必须等于小时价乘时长",
+);
+assert.equal(
+  calculateOrderBasePrice(
+    { order_type: "escort", base_price: 200, hourly_rate: 0 },
+    24,
+  ),
+  200,
+  "护航单基础价不能受时长影响",
+);
+assert.throws(
+  () => normalizeCompanionHours(0.5),
+  /1 到 24 小时/,
+  "陪玩时长不能小于 1 小时",
+);
+assert.throws(
+  () => normalizeCompanionHours(1.25),
+  /0.5 小时为步进/,
+  "陪玩时长必须使用半小时步进",
+);
 
 console.log(
-  `Settlement verification passed: ${cases.length} settlement scenarios + 9 validation assertions.`,
+  `Settlement verification passed: ${cases.length} settlement scenarios + 13 validation assertions.`,
 );

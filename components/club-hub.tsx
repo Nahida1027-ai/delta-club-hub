@@ -99,6 +99,8 @@ import type {
 } from "@/lib/club-types";
 import {
   calculateSettlement,
+  normalizeOrderType,
+  orderTypeLabel,
   orderTipTotal,
   resolveOrderTipsByWorker,
   splitLabel,
@@ -122,6 +124,11 @@ function formatMoney(value: number) {
     currency: "CNY",
     minimumFractionDigits: 2,
   }).format(value);
+}
+
+function formatHours(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
 function shortMoney(value: number) {
@@ -470,8 +477,12 @@ function TierBadge({ tier }: { tier: WorkerTier }) {
 }
 
 function ServiceRule({ item }: { item: PriceMenuItem }) {
+  const orderType = normalizeOrderType(item.order_type);
   return (
     <div className="flex flex-wrap items-center gap-2 text-[13px]">
+      <span className={`rounded-lg px-2.5 py-1 ${orderType === "companion" ? "bg-[#30D158]/12 text-[#7EF29A]" : "bg-[#007AFF]/12 text-[#64D2FF]"}`}>
+        {orderType === "companion" ? "陪玩" : "护航"}
+      </span>
       {item.commission_mode === "by_tier" ? (
         <>
           <span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 text-[#64D2FF]">按档位抽成</span>
@@ -547,7 +558,11 @@ function OrderDesk({
                   <span className="text-sm text-white/35">{available} 人可接</span>
                 </div>
                 <h3 className="mt-5 text-lg font-semibold text-white">{item.service_name}</h3>
-                <p className="mt-2 text-[32px] font-semibold tracking-[-0.045em] text-white">{formatMoney(item.base_price)}</p>
+                <p className="mt-2 text-[32px] font-semibold tracking-[-0.045em] text-white">
+                  {normalizeOrderType(item.order_type) === "companion"
+                    ? <>{formatMoney(item.hourly_rate)} <span className="text-base font-medium tracking-normal text-white/38">/ 小时</span></>
+                    : formatMoney(item.base_price)}
+                </p>
                 <div className="mt-4"><ServiceRule item={item} /></div>
                 {!available || (item.split_type !== "single" && available < 2) ? (
                   <p className="mt-3 text-sm text-[#FF6961]">匹配的空闲打手不足，暂时无法派单</p>
@@ -592,14 +607,23 @@ function OrderDesk({
                   <p className="mt-1 text-sm text-white/38">
                     #{order.id.slice(0, 8)} · {formatDateTime(order.created_at)} · {formatMoney(order.total_price)}
                   </p>
-                  {order.special_requirements.length ? (
+                  {order.order_type === "companion" || order.special_requirements.length ? (
                     <div className="mt-2 flex flex-wrap gap-1.5">
-                      <Badge className="border-[#5E5CE6]/20 bg-[#5E5CE6]/10 text-[#C4C3FF]">
-                        特殊需求 × {order.special_requirements.length}
-                      </Badge>
-                      <Badge className="border-[#007AFF]/20 bg-[#007AFF]/10 text-[#64D2FF]">
-                        +{formatMoney(order.special_total)}
-                      </Badge>
+                      {order.order_type === "companion" ? (
+                        <Badge className="border-[#30D158]/20 bg-[#30D158]/10 text-[#7EF29A]">
+                          陪玩 {formatHours(order.hours)} 小时
+                        </Badge>
+                      ) : null}
+                      {order.special_requirements.length ? (
+                        <>
+                          <Badge className="border-[#5E5CE6]/20 bg-[#5E5CE6]/10 text-[#C4C3FF]">
+                            特殊需求 × {order.special_requirements.length}
+                          </Badge>
+                          <Badge className="border-[#007AFF]/20 bg-[#007AFF]/10 text-[#64D2FF]">
+                            +{formatMoney(order.special_total)}
+                          </Badge>
+                        </>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -771,14 +795,23 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                       <div className="rounded-xl border border-[#FF453A]/15 bg-[#FF453A]/[0.055] p-3">
                         <p className="truncate text-sm font-medium text-white/85">{activeOrder.pricing_snapshot.service_name}</p>
                         <p className="mt-1 text-[12px] text-white/35">订单 #{activeOrder.id.slice(0, 8)}</p>
-                        {activeOrder.special_requirements.length ? (
+                        {activeOrder.order_type === "companion" || activeOrder.special_requirements.length ? (
                           <div className="mt-2 flex flex-wrap gap-1.5">
-                            <span className="rounded-md bg-[#5E5CE6]/15 px-2 py-1 text-[11px] text-[#C4C3FF]">
-                              特殊需求 × {activeOrder.special_requirements.length}
-                            </span>
-                            <span className="rounded-md bg-[#007AFF]/15 px-2 py-1 text-[11px] text-[#64D2FF]">
-                              +{formatMoney(activeOrder.special_total)}
-                            </span>
+                            {activeOrder.order_type === "companion" ? (
+                              <span className="rounded-md bg-[#30D158]/15 px-2 py-1 text-[11px] text-[#7EF29A]">
+                                陪玩 {formatHours(activeOrder.hours)} 小时
+                              </span>
+                            ) : null}
+                            {activeOrder.special_requirements.length ? (
+                              <>
+                                <span className="rounded-md bg-[#5E5CE6]/15 px-2 py-1 text-[11px] text-[#C4C3FF]">
+                                  特殊需求 × {activeOrder.special_requirements.length}
+                                </span>
+                                <span className="rounded-md bg-[#007AFF]/15 px-2 py-1 text-[11px] text-[#64D2FF]">
+                                  +{formatMoney(activeOrder.special_total)}
+                                </span>
+                              </>
+                            ) : null}
                           </div>
                         ) : null}
                       </div>
@@ -1041,7 +1074,11 @@ function FinishOrderDialog({
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="font-medium text-white">{order.pricing_snapshot.service_name}</p>
-                <p className="mt-1 text-sm text-white/40">基础价格与特殊需求加价</p>
+                <p className="mt-1 text-sm text-white/40">
+                  {order.order_type === "companion"
+                    ? `${formatMoney(order.hourly_rate_snapshot ?? 0)} × ${formatHours(order.hours)} 小时 · 含特殊需求加价`
+                    : "基础价格与特殊需求加价"}
+                </p>
               </div>
               <p className="shrink-0 text-xl font-semibold tracking-[-0.03em] text-[#64D2FF]">{formatMoney(order.total_price)}</p>
             </div>
@@ -1180,7 +1217,7 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
           <TableHeader>
             <TableRow className="border-white/[0.07] hover:bg-transparent">
               <TableHead className="h-12 px-5 text-white/40 sm:px-6">服务项目</TableHead>
-              <TableHead className="text-white/40">基础单价</TableHead>
+              <TableHead className="text-white/40">计价方式</TableHead>
               <TableHead className="text-white/40">俱乐部抽成</TableHead>
               <TableHead className="text-white/40">分配模式</TableHead>
               <TableHead className="text-white/40">可接档位</TableHead>
@@ -1199,8 +1236,19 @@ function PriceMenuPanel({ menu }: { menu: PriceMenuItem[] }) {
                 transition={{ type: "spring", stiffness: 260, damping: 26 }}
                 className="border-b border-white/[0.06] transition-colors hover:bg-white/[0.025]"
               >
-                <TableCell className="px-5 py-5 font-medium text-white sm:px-6">{item.service_name}</TableCell>
-                <TableCell className="font-semibold text-white">{formatMoney(item.base_price)}</TableCell>
+                <TableCell className="px-5 py-5 sm:px-6">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-white">{item.service_name}</span>
+                    <span className={`rounded-md px-2 py-1 text-[11px] ${normalizeOrderType(item.order_type) === "companion" ? "bg-[#30D158]/12 text-[#7EF29A]" : "bg-[#007AFF]/12 text-[#64D2FF]"}`}>
+                      {normalizeOrderType(item.order_type) === "companion" ? "陪玩" : "护航"}
+                    </span>
+                  </div>
+                </TableCell>
+                <TableCell className="font-semibold text-white">
+                  {normalizeOrderType(item.order_type) === "companion"
+                    ? <>{formatMoney(item.hourly_rate)} <span className="text-[12px] font-normal text-white/35">/ 小时</span></>
+                    : formatMoney(item.base_price)}
+                </TableCell>
                 <TableCell>
                   {item.commission_mode === "by_tier" ? (
                     <div>
@@ -1278,6 +1326,7 @@ function OrderHistoryItem({
   onDelete: (order: Order) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const orderType = normalizeOrderType(order.order_type ?? order.pricing_snapshot.order_type);
   const tipsByWorker = resolveOrderTipsByWorker(order);
   const totalTip = orderTipTotal(order);
   const commissionText = order.pricing_snapshot.commission_mode === "by_tier"
@@ -1308,7 +1357,7 @@ function OrderHistoryItem({
             <span>
               <span className="block font-medium text-white">{order.pricing_snapshot.service_name}</span>
               <span className="mt-1 block text-[12px] text-white/35">
-                {formatMoney(order.total_price)} · {commissionText} · {splitLabel(order.pricing_snapshot.split_type)}
+                {orderTypeLabel(orderType)} · {formatMoney(order.total_price)} · {commissionText} · {splitLabel(order.pricing_snapshot.split_type)}
               </span>
             </span>
             <span className="mt-0.5 flex shrink-0 items-center gap-1 text-xs text-[#64D2FF]">
@@ -1330,6 +1379,13 @@ function OrderHistoryItem({
             >
               <div className="mt-3 rounded-xl border border-white/[0.07] bg-black/20 p-3 text-xs">
                 <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-white/48">
+                  <span>订单类型</span><span className={`text-right ${orderType === "companion" ? "text-[#7EF29A]" : "text-[#64D2FF]"}`}>{orderTypeLabel(orderType)}</span>
+                  {orderType === "companion" ? (
+                    <>
+                      <span>每小时价格 × 时长</span>
+                      <span className="text-right text-white/75">{formatMoney(order.hourly_rate_snapshot ?? 0)} × {formatHours(order.hours)} 小时</span>
+                    </>
+                  ) : null}
                   <span>基础价格</span><span className="text-right text-white/75">{formatMoney(order.base_price_snapshot)}</span>
                   <span>特殊需求加价</span><span className="text-right text-[#C4C3FF]">+{formatMoney(order.special_total)}</span>
                   <span>订单总价</span><span className="text-right font-medium text-white">{formatMoney(order.total_price)}</span>

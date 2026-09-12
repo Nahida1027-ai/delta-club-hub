@@ -14,10 +14,13 @@ import type {
 } from "@/lib/club-types";
 import {
   buildPayoutWeights,
+  calculateOrderBasePrice,
   calculateSettlement,
   defaultTierCommissionRates,
   fromCents,
   normalizeSpecialRequirements,
+  normalizeCompanionHours,
+  normalizeOrderType,
   normalizeTipsByWorker,
   specialRequirementsTotal,
   tipsByWorkerTotal,
@@ -59,6 +62,7 @@ interface ClubStore extends ClubData {
     menuItemId: string,
     workerIds: string[],
     specialRequirements?: SpecialRequirement[],
+    hours?: number,
   ) => Promise<string>;
   finishOrder: (orderId: string, tipsByWorker: TipsByWorker) => Promise<SettlementResult>;
 }
@@ -227,10 +231,14 @@ export const useClubStore = create<ClubStore>((set, get) => ({
   addMenuItem: async (data) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
+    const orderType = normalizeOrderType(data.order_type);
     const item: PriceMenuItem = {
       ...data,
       id: crypto.randomUUID(),
       service_name: data.service_name.trim(),
+      order_type: orderType,
+      base_price: orderType === "escort" ? data.base_price : 0,
+      hourly_rate: orderType === "companion" ? data.hourly_rate : 0,
       commission_mode: data.commission_mode ?? "uniform",
       tier_commission_rates: {
         ...(data.tier_commission_rates ?? defaultTierCommissionRates()),
@@ -244,7 +252,6 @@ export const useClubStore = create<ClubStore>((set, get) => ({
           ? ["1档", "2档"]
           : [...data.eligible_tiers],
     };
-    if (toCents(item.base_price) <= 0) throw new Error("基础价格必须大于 0");
     if (
       item.split_type === "tiered" &&
       (!Number.isFinite(item.tiered_ratios?.["1档"]) ||
@@ -452,9 +459,13 @@ export const useClubStore = create<ClubStore>((set, get) => ({
 
   updateMenuItem: async (item) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const orderType = normalizeOrderType(item.order_type);
     const normalizedItem: PriceMenuItem = {
       ...item,
       service_name: item.service_name.trim(),
+      order_type: orderType,
+      base_price: orderType === "escort" ? item.base_price : 0,
+      hourly_rate: orderType === "companion" ? item.hourly_rate : 0,
       commission_mode: item.commission_mode ?? "uniform",
       tier_commission_rates: {
         ...(item.tier_commission_rates ?? defaultTierCommissionRates()),
@@ -515,7 +526,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 
-  createOrder: async (menuItemId, workerIds, specialRequirements = []) => {
+  createOrder: async (menuItemId, workerIds, specialRequirements = [], hours) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
     const menuItem = state.menu.find((item) => item.id === menuItemId);
@@ -534,13 +545,26 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     );
     const normalizedRequirements = normalizeSpecialRequirements(specialRequirements);
     const specialTotal = specialRequirementsTotal(normalizedRequirements);
+    const orderType = normalizeOrderType(menuItem.order_type);
+    const orderHours = orderType === "companion"
+      ? normalizeCompanionHours(hours ?? 1)
+      : null;
+    const hourlyRateSnapshot = orderType === "companion"
+      ? menuItem.hourly_rate
+      : null;
+    const basePriceSnapshot = calculateOrderBasePrice(
+      menuItem,
+      orderHours ?? 1,
+    );
     const orderOriginalTotal = fromCents(
-      toCents(menuItem.base_price) + toCents(specialTotal),
+      toCents(basePriceSnapshot) + toCents(specialTotal),
     );
     toCents(orderOriginalTotal);
     const snapshot: OrderPricingSnapshot = {
       service_name: menuItem.service_name,
-      base_price: menuItem.base_price,
+      order_type: orderType,
+      hourly_rate: hourlyRateSnapshot ?? 0,
+      base_price: basePriceSnapshot,
       commission_mode: menuItem.commission_mode,
       club_commission_rate: menuItem.club_commission_rate,
       tier_commission_rates: { ...menuItem.tier_commission_rates },
@@ -554,6 +578,9 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       id: optimisticId,
       menu_item_id: menuItemId,
       assigned_worker_ids: workerIds,
+      order_type: orderType,
+      hours: orderHours,
+      hourly_rate_snapshot: hourlyRateSnapshot,
       split_type: menuItem.split_type,
       status: "active",
       tip: 0,
@@ -561,7 +588,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       final_club_income: null,
       final_worker_incomes: [],
       special_requirements: normalizedRequirements,
-      base_price_snapshot: menuItem.base_price,
+      base_price_snapshot: basePriceSnapshot,
       special_total: specialTotal,
       total_price: orderOriginalTotal,
       order_original_total: orderOriginalTotal,
@@ -584,6 +611,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         menu_item_id: menuItemId,
         assigned_worker_ids: workerIds,
         special_requirements: normalizedRequirements,
+        hours: orderHours,
       });
       set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
       return data.created_order_id ?? optimisticId;

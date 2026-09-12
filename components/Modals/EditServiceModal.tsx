@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import type {
   CommissionMode,
+  OrderType,
   PriceMenuItem,
   SplitType,
   Worker,
@@ -32,6 +33,7 @@ import type {
 } from "@/lib/club-types";
 import {
   buildPayoutWeights,
+  calculateOrderBasePrice,
   calculateSettlement,
   validateMenuRule,
 } from "@/lib/settlement";
@@ -44,6 +46,7 @@ const tiers: WorkerTier[] = ["1档", "2档", "3档"];
 type FieldName =
   | "serviceName"
   | "price"
+  | "hourlyRate"
   | "commission"
   | "tier1Commission"
   | "tier2Commission"
@@ -83,7 +86,11 @@ function EditServiceForm({
   const updateMenuItem = useClubStore((state) => state.updateMenuItem);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [serviceName, setServiceName] = useState(item.service_name);
+  const [orderType, setOrderType] = useState<OrderType>(item.order_type ?? "escort");
   const [price, setPrice] = useState(String(item.base_price));
+  const [hourlyRate, setHourlyRate] = useState(
+    item.hourly_rate > 0 ? String(item.hourly_rate) : "",
+  );
   const [commissionMode, setCommissionMode] = useState<CommissionMode>(
     item.commission_mode ?? "uniform",
   );
@@ -113,15 +120,22 @@ function EditServiceForm({
   function validate(): FieldErrors {
     const nextErrors: FieldErrors = {};
     const numericPrice = Number(price);
+    const numericHourlyRate = Number(hourlyRate);
     const numericCommission = Number(commission);
     const numericFirst = Number(firstRatio);
     const numericSecond = Number(secondRatio);
 
     if (!serviceName.trim()) nextErrors.serviceName = "请输入服务名称";
-    if (!price.trim()) {
-      nextErrors.price = "请输入基础价格";
-    } else if (!Number.isFinite(numericPrice) || Math.round(numericPrice * 100) <= 0) {
-      nextErrors.price = "基础价格必须大于 0";
+    if (orderType === "escort") {
+      if (!price.trim()) {
+        nextErrors.price = "请输入基础价格";
+      } else if (!Number.isFinite(numericPrice) || Math.round(numericPrice * 100) <= 0) {
+        nextErrors.price = "基础价格必须大于 0";
+      }
+    } else if (!hourlyRate.trim()) {
+      nextErrors.hourlyRate = "请输入每小时价格";
+    } else if (!Number.isFinite(numericHourlyRate) || Math.round(numericHourlyRate * 100) <= 0) {
+      nextErrors.hourlyRate = "每小时价格必须大于 0";
     }
 
     if (commissionMode === "uniform") {
@@ -180,7 +194,9 @@ function EditServiceForm({
     return {
       id: item.id,
       service_name: serviceName.trim(),
-      base_price: Number(price),
+      order_type: orderType,
+      base_price: orderType === "escort" ? Number(price) : 0,
+      hourly_rate: orderType === "companion" ? Number(hourlyRate) : 0,
       commission_mode: commissionMode,
       club_commission_rate: Number(commission),
       tier_commission_rates: {
@@ -269,26 +285,96 @@ function EditServiceForm({
               />
             </Field>
 
-            <Field id="edit-service-price" label="基础价格（元）" error={errors.price} className="sm:col-span-2">
-              <div className="relative">
-                <span aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-white/35">¥</span>
-                <Input
-                  id="edit-service-price"
-                  type="number"
-                  inputMode="decimal"
-                  min="0.01"
-                  step="0.01"
-                  value={price}
-                  aria-invalid={Boolean(errors.price)}
-                  aria-describedby={errors.price ? "edit-service-price-error" : undefined}
-                  onChange={(event) => {
-                    setPrice(event.target.value);
-                    clearFieldError("price");
-                  }}
-                  className={`${inputClass} pl-8`}
-                />
-              </div>
-            </Field>
+            <fieldset className="space-y-2 sm:col-span-2">
+              <legend className="text-sm font-medium text-white/65">订单类型</legend>
+              <RadioGroup
+                value={orderType}
+                onValueChange={(value) => {
+                  setOrderType(value as OrderType);
+                  setErrors((current) => ({
+                    ...current,
+                    price: undefined,
+                    hourlyRate: undefined,
+                  }));
+                  setSubmitError("");
+                }}
+                className="grid grid-cols-2 gap-2"
+                aria-label="订单类型"
+              >
+                <label htmlFor="edit-service-type-escort" className={`flex cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 text-sm transition ${orderType === "escort" ? "border-[#007AFF]/50 bg-[#007AFF]/12 text-white" : "border-white/10 bg-white/[0.035] text-white/45 hover:bg-white/[0.06]"}`}>
+                  <RadioGroupItem id="edit-service-type-escort" value="escort" className="border-white/25 text-[#007AFF]" />
+                  <span><span className="block font-medium">护航单</span><span className="mt-0.5 block text-[12px] opacity-60">按固定基础价格计费</span></span>
+                </label>
+                <label htmlFor="edit-service-type-companion" className={`flex cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 text-sm transition ${orderType === "companion" ? "border-[#30D158]/45 bg-[#30D158]/10 text-white" : "border-white/10 bg-white/[0.035] text-white/45 hover:bg-white/[0.06]"}`}>
+                  <RadioGroupItem id="edit-service-type-companion" value="companion" className="border-white/25 text-[#30D158]" />
+                  <span><span className="block font-medium">陪玩单</span><span className="mt-0.5 block text-[12px] opacity-60">按小时价格 × 时长计费</span></span>
+                </label>
+              </RadioGroup>
+            </fieldset>
+
+            <AnimatePresence initial={false} mode="wait">
+              {orderType === "escort" ? (
+                <motion.div
+                  key="escort-price"
+                  initial={{ opacity: 0, height: 0, y: -8 }}
+                  animate={{ opacity: 1, height: "auto", y: 0 }}
+                  exit={{ opacity: 0, height: 0, y: -8 }}
+                  transition={{ duration: 0.2, ease: "easeOut" }}
+                  className="overflow-hidden sm:col-span-2"
+                >
+                  <Field id="edit-service-price" label="基础价格（元）" error={errors.price}>
+                    <div className="relative">
+                      <span aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-white/35">¥</span>
+                      <Input
+                        id="edit-service-price"
+                        type="number"
+                        inputMode="decimal"
+                        min="0.01"
+                        step="0.01"
+                        value={price}
+                        aria-invalid={Boolean(errors.price)}
+                        aria-describedby={errors.price ? "edit-service-price-error" : undefined}
+                        onChange={(event) => {
+                          setPrice(event.target.value);
+                          clearFieldError("price");
+                        }}
+                        className={`${inputClass} pl-8`}
+                      />
+                    </div>
+                  </Field>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="companion-rate"
+                  initial={{ opacity: 0, height: 0, y: -8 }}
+                  animate={{ opacity: 1, height: "auto", y: 0 }}
+                  exit={{ opacity: 0, height: 0, y: -8 }}
+                  transition={{ duration: 0.2, ease: "easeOut" }}
+                  className="overflow-hidden sm:col-span-2"
+                >
+                  <Field id="edit-service-hourly-rate" label="每小时价格（元 / 小时）" error={errors.hourlyRate} tone="green">
+                    <div className="relative">
+                      <span aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-white/35">¥</span>
+                      <Input
+                        id="edit-service-hourly-rate"
+                        type="number"
+                        inputMode="decimal"
+                        min="0.01"
+                        step="0.01"
+                        value={hourlyRate}
+                        aria-invalid={Boolean(errors.hourlyRate)}
+                        aria-describedby={errors.hourlyRate ? "edit-service-hourly-rate-error" : undefined}
+                        onChange={(event) => {
+                          setHourlyRate(event.target.value);
+                          clearFieldError("hourlyRate");
+                        }}
+                        className={`${inputClass} pl-8`}
+                      />
+                    </div>
+                  </Field>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             <fieldset className="space-y-2 sm:col-span-2">
               <legend className="text-sm font-medium text-white/65">抽成模式</legend>
@@ -563,6 +649,7 @@ function CommissionModeOption({
 function buildPreview(item: PriceMenuItem) {
   try {
     validateMenuRule(item);
+    const previewBasePrice = calculateOrderBasePrice(item, 1);
     const demoWorkers: Worker[] = item.split_type === "single"
       ? [{ id: "demo-1", name: "示例打手", tier: item.eligible_tiers[0] ?? "1档", status: "idle", total_completed_orders: 0 }]
       : item.split_type === "tiered"
@@ -582,7 +669,9 @@ function buildPreview(item: PriceMenuItem) {
     const result = calculateSettlement(
       {
         service_name: item.service_name,
-        base_price: item.base_price,
+        order_type: item.order_type,
+        hourly_rate: item.order_type === "companion" ? item.hourly_rate : 0,
+        base_price: previewBasePrice,
         commission_mode: item.commission_mode,
         club_commission_rate: item.club_commission_rate,
         tier_commission_rates: item.tier_commission_rates,
@@ -591,14 +680,17 @@ function buildPreview(item: PriceMenuItem) {
         payout_weights: payoutWeights,
       },
       {},
-      item.base_price,
+      previewBasePrice,
     );
     return {
       result,
       error: null,
-      tierLabel: item.commission_mode === "by_tier"
-        ? `示例档位：${demoWorkers.map((worker) => worker.tier).join(" + ")}`
-        : null,
+      tierLabel: [
+        item.order_type === "companion" ? "陪玩 1 小时" : null,
+        item.commission_mode === "by_tier"
+          ? `示例档位：${demoWorkers.map((worker) => worker.tier).join(" + ")}`
+          : null,
+      ].filter(Boolean).join(" · ") || null,
     };
   } catch (error) {
     return {
@@ -645,13 +737,13 @@ function Field({
   id: string;
   label: string;
   error?: string;
-  tone?: "default" | "violet" | "blue";
+  tone?: "default" | "violet" | "blue" | "green";
   className?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className={`space-y-2 ${className}`}>
-      <label htmlFor={id} className={`text-sm font-medium ${tone === "violet" ? "text-[#C4C3FF]" : tone === "blue" ? "text-[#8FD3FF]" : "text-white/65"}`}>{label}</label>
+      <label htmlFor={id} className={`text-sm font-medium ${tone === "violet" ? "text-[#C4C3FF]" : tone === "blue" ? "text-[#8FD3FF]" : tone === "green" ? "text-[#7EF29A]" : "text-white/65"}`}>{label}</label>
       {children}
       {error ? <p id={`${id}-error`} role="alert" className="text-[13px] text-[#FF6961]">{error}</p> : null}
     </div>

@@ -6,6 +6,8 @@ export type SplitType = "single" | "equal" | "tiered";
 
 export type CommissionMode = "uniform" | "by_tier";
 
+export type OrderType = "escort" | "companion";
+
 export interface Worker {
   id: string;
   name: string;
@@ -33,7 +35,11 @@ export interface SpecialRequirement {
 export interface PriceMenuItem {
   id: string;
   service_name: string;
+  /** 护航单使用固定价，陪玩单使用小时价。旧服务默认 escort。 */
+  order_type: OrderType;
   base_price: number;
+  /** 仅陪玩单生效，单位：元 / 小时。 */
+  hourly_rate: number;
   commission_mode: CommissionMode;
   club_commission_rate: number;
   tier_commission_rates: TierCommissionRates;
@@ -53,6 +59,10 @@ export interface PayoutWeight {
 /** 创建订单时固化，后续编辑价格表不会改变这张订单。 */
 export interface OrderPricingSnapshot {
   service_name: string;
+  order_type: OrderType;
+  /** 陪玩单下单时冻结的小时价；护航单为 0。 */
+  hourly_rate: number;
+  /** 统一保存本单实际基础价；陪玩单为 hourly_rate × hours。 */
   base_price: number;
   commission_mode: CommissionMode;
   club_commission_rate: number;
@@ -73,6 +83,12 @@ export interface Order {
   id: string;
   menu_item_id: string;
   assigned_worker_ids: string[];
+  /** 历史订单缺失时按 escort 读取。 */
+  order_type: OrderType;
+  /** 仅陪玩单使用，支持 0.5 小时步进。 */
+  hours: number | null;
+  /** 陪玩单下单时冻结的小时价；护航单为 null。 */
+  hourly_rate_snapshot: number | null;
   /** 下单时冻结的分配模式；旧单仍可从 pricing_snapshot 回填。 */
   split_type: SplitType;
   status: "active" | "completed";

@@ -22,7 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import type { CommissionMode, PriceMenuItem, SplitType } from "@/lib/club-types";
+import type { CommissionMode, OrderType, PriceMenuItem, SplitType } from "@/lib/club-types";
 import { useClubStore } from "@/store/use-club-store";
 
 const inputClass =
@@ -31,6 +31,7 @@ const inputClass =
 type FieldName =
   | "serviceName"
   | "price"
+  | "hourlyRate"
   | "commission"
   | "tier1Commission"
   | "tier2Commission"
@@ -48,7 +49,9 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
   const addMenuItem = useClubStore((state) => state.addMenuItem);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [serviceName, setServiceName] = useState("");
+  const [orderType, setOrderType] = useState<OrderType>("escort");
   const [price, setPrice] = useState("");
+  const [hourlyRate, setHourlyRate] = useState("");
   const [commissionMode, setCommissionMode] = useState<CommissionMode>("uniform");
   const [commission, setCommission] = useState("0");
   const [tierCommissions, setTierCommissions] = useState({
@@ -69,15 +72,22 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
   function validate(): FieldErrors {
     const nextErrors: FieldErrors = {};
     const numericPrice = Number(price);
+    const numericHourlyRate = Number(hourlyRate);
     const numericCommission = Number(commission);
     const numericFirst = Number(firstRatio);
     const numericSecond = Number(secondRatio);
 
     if (!serviceName.trim()) nextErrors.serviceName = "请输入服务名称";
-    if (!price.trim()) {
-      nextErrors.price = "请输入基础价格";
-    } else if (!Number.isFinite(numericPrice) || Math.round(numericPrice * 100) <= 0) {
-      nextErrors.price = "基础价格必须大于 0";
+    if (orderType === "escort") {
+      if (!price.trim()) {
+        nextErrors.price = "请输入基础价格";
+      } else if (!Number.isFinite(numericPrice) || Math.round(numericPrice * 100) <= 0) {
+        nextErrors.price = "基础价格必须大于 0";
+      }
+    } else if (!hourlyRate.trim()) {
+      nextErrors.hourlyRate = "请输入每小时价格";
+    } else if (!Number.isFinite(numericHourlyRate) || Math.round(numericHourlyRate * 100) <= 0) {
+      nextErrors.hourlyRate = "每小时价格必须大于 0";
     }
     if (commissionMode === "uniform") {
       if (!commission.trim()) {
@@ -132,7 +142,9 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
 
     const item: Omit<PriceMenuItem, "id"> = {
       service_name: serviceName.trim(),
-      base_price: Number(price),
+      order_type: orderType,
+      base_price: orderType === "escort" ? Number(price) : 0,
+      hourly_rate: orderType === "companion" ? Number(hourlyRate) : 0,
       commission_mode: commissionMode,
       club_commission_rate: Number(commission),
       tier_commission_rates: {
@@ -201,27 +213,98 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
               />
             </Field>
 
-            <Field id="add-service-price" label="基础价格（元）" error={errors.price}>
-              <div className="relative">
-                <span aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-white/35">¥</span>
-                <Input
-                  id="add-service-price"
-                  type="number"
-                  inputMode="decimal"
-                  min="0.01"
-                  step="0.01"
-                  value={price}
-                  placeholder="0.00"
-                  aria-invalid={Boolean(errors.price)}
-                  aria-describedby={errors.price ? "add-service-price-error" : undefined}
-                  onChange={(event) => {
-                    setPrice(event.target.value);
-                    clearFieldError("price");
-                  }}
-                  className={`${inputClass} pl-8`}
-                />
-              </div>
-            </Field>
+            <fieldset className="space-y-2 sm:col-span-2">
+              <legend className="text-sm font-medium text-white/65">订单类型</legend>
+              <RadioGroup
+                value={orderType}
+                onValueChange={(value) => {
+                  setOrderType(value as OrderType);
+                  setErrors((current) => ({
+                    ...current,
+                    price: undefined,
+                    hourlyRate: undefined,
+                  }));
+                  setSubmitError("");
+                }}
+                className="grid grid-cols-2 gap-2"
+                aria-label="订单类型"
+              >
+                <label htmlFor="add-service-type-escort" className={`flex cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 text-sm transition ${orderType === "escort" ? "border-[#007AFF]/50 bg-[#007AFF]/12 text-white" : "border-white/10 bg-white/[0.035] text-white/45 hover:bg-white/[0.06]"}`}>
+                  <RadioGroupItem id="add-service-type-escort" value="escort" className="border-white/25 text-[#007AFF]" />
+                  <span><span className="block font-medium">护航单</span><span className="mt-0.5 block text-[12px] opacity-60">按固定基础价格计费</span></span>
+                </label>
+                <label htmlFor="add-service-type-companion" className={`flex cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 text-sm transition ${orderType === "companion" ? "border-[#30D158]/45 bg-[#30D158]/10 text-white" : "border-white/10 bg-white/[0.035] text-white/45 hover:bg-white/[0.06]"}`}>
+                  <RadioGroupItem id="add-service-type-companion" value="companion" className="border-white/25 text-[#30D158]" />
+                  <span><span className="block font-medium">陪玩单</span><span className="mt-0.5 block text-[12px] opacity-60">按小时价格 × 时长计费</span></span>
+                </label>
+              </RadioGroup>
+            </fieldset>
+
+            <AnimatePresence initial={false} mode="wait">
+              {orderType === "escort" ? (
+                <motion.div
+                  key="escort-price"
+                  initial={{ opacity: 0, height: 0, y: -8 }}
+                  animate={{ opacity: 1, height: "auto", y: 0 }}
+                  exit={{ opacity: 0, height: 0, y: -8 }}
+                  transition={{ duration: 0.2, ease: "easeOut" }}
+                  className="overflow-hidden sm:col-span-2"
+                >
+                  <Field id="add-service-price" label="基础价格（元）" error={errors.price}>
+                    <div className="relative">
+                      <span aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-white/35">¥</span>
+                      <Input
+                        id="add-service-price"
+                        type="number"
+                        inputMode="decimal"
+                        min="0.01"
+                        step="0.01"
+                        value={price}
+                        placeholder="0.00"
+                        aria-invalid={Boolean(errors.price)}
+                        aria-describedby={errors.price ? "add-service-price-error" : undefined}
+                        onChange={(event) => {
+                          setPrice(event.target.value);
+                          clearFieldError("price");
+                        }}
+                        className={`${inputClass} pl-8`}
+                      />
+                    </div>
+                  </Field>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="companion-rate"
+                  initial={{ opacity: 0, height: 0, y: -8 }}
+                  animate={{ opacity: 1, height: "auto", y: 0 }}
+                  exit={{ opacity: 0, height: 0, y: -8 }}
+                  transition={{ duration: 0.2, ease: "easeOut" }}
+                  className="overflow-hidden sm:col-span-2"
+                >
+                  <Field id="add-service-hourly-rate" label="每小时价格（元 / 小时）" error={errors.hourlyRate} tone="green">
+                    <div className="relative">
+                      <span aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-white/35">¥</span>
+                      <Input
+                        id="add-service-hourly-rate"
+                        type="number"
+                        inputMode="decimal"
+                        min="0.01"
+                        step="0.01"
+                        value={hourlyRate}
+                        placeholder="0.00"
+                        aria-invalid={Boolean(errors.hourlyRate)}
+                        aria-describedby={errors.hourlyRate ? "add-service-hourly-rate-error" : undefined}
+                        onChange={(event) => {
+                          setHourlyRate(event.target.value);
+                          clearFieldError("hourlyRate");
+                        }}
+                        className={`${inputClass} pl-8`}
+                      />
+                    </div>
+                  </Field>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             <fieldset className="space-y-2 sm:col-span-2">
               <legend className="text-sm font-medium text-white/65">抽成模式</legend>
@@ -453,13 +536,13 @@ function Field({
   id: string;
   label: string;
   error?: string;
-  tone?: "default" | "violet" | "blue";
+  tone?: "default" | "violet" | "blue" | "green";
   className?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className={`space-y-2 ${className}`}>
-      <label htmlFor={id} className={`text-sm font-medium ${tone === "violet" ? "text-[#C4C3FF]" : tone === "blue" ? "text-[#8FD3FF]" : "text-white/65"}`}>
+      <label htmlFor={id} className={`text-sm font-medium ${tone === "violet" ? "text-[#C4C3FF]" : tone === "blue" ? "text-[#8FD3FF]" : tone === "green" ? "text-[#7EF29A]" : "text-white/65"}`}>
         {label}
       </label>
       {children}

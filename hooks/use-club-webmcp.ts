@@ -40,15 +40,20 @@ export function useClubWebMcp() {
                   .map((order) => ({
                     id: order.id,
                     serviceName: order.pricing_snapshot.service_name,
+                    orderType: order.order_type,
+                    hours: order.hours,
+                    hourlyRate: order.hourly_rate_snapshot,
                     workerIds: order.assigned_worker_ids,
                     basePrice: order.base_price_snapshot,
                     specialTotal: order.special_total,
                     totalPrice: order.total_price,
                     specialRequirementCount: order.special_requirements.length,
                   })),
-                services: state.menu.map(({ id, service_name, split_type, commission_mode }) => ({
+                services: state.menu.map(({ id, service_name, order_type, hourly_rate, split_type, commission_mode }) => ({
                   id,
                   serviceName: service_name,
+                  orderType: order_type,
+                  hourlyRate: hourly_rate,
                   splitType: split_type,
                   commissionMode: commission_mode,
                 })),
@@ -91,6 +96,13 @@ export function useClubWebMcp() {
                     additionalProperties: false,
                   },
                 },
+                hours: {
+                  type: "number",
+                  minimum: 1,
+                  maximum: 24,
+                  multipleOf: 0.5,
+                  description: "陪玩单时长；护航单忽略。未提供时陪玩单默认 1 小时",
+                },
               },
               required: ["menuItemId", "workerIds"],
               additionalProperties: false,
@@ -114,13 +126,18 @@ export function useClubWebMcp() {
                     return { name: requirement.name, price: requirement.price };
                   })
                 : [];
+              const hours = data.hours === undefined ? undefined : Number(data.hours);
+              if (hours !== undefined && !Number.isFinite(hours)) {
+                throw new Error("hours 必须是有效数字");
+              }
               const orderId = await useClubStore
                 .getState()
-                .createOrder(data.menuItemId, workerIds, specialRequirements);
+                .createOrder(data.menuItemId, workerIds, specialRequirements, hours);
               return {
                 orderId,
                 status: "active",
                 lockedWorkerIds: workerIds,
+                hours: hours ?? null,
                 specialRequirementCount: specialRequirements.length,
               };
             },

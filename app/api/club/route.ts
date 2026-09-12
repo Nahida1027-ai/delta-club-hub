@@ -4,6 +4,7 @@ import type {
   CommissionMode,
   Order,
   OrderPricingSnapshot,
+  OrderType,
   PriceMenuItem,
   SpecialRequirement,
   SplitType,
@@ -16,11 +17,14 @@ import type {
 } from "@/lib/club-types";
 import {
   buildPayoutWeights,
+  calculateOrderBasePrice,
   calculateSettlement,
   defaultTierCommissionRates,
   fromCents,
   legacyTipsByWorker,
   normalizeSpecialRequirements,
+  normalizeCompanionHours,
+  normalizeOrderType,
   normalizeTipsByWorker,
   specialRequirementsTotal,
   tipsByWorkerTotal,
@@ -41,7 +45,9 @@ interface WorkerRow {
 interface MenuRow {
   id: string;
   service_name: string;
+  order_type: string;
   base_price_cents: number;
+  hourly_rate_cents: number;
   commission_mode: string;
   club_commission_bps: number;
   tier_commission_rates_json: string;
@@ -54,6 +60,9 @@ interface OrderRow {
   id: string;
   menu_item_id: string;
   assigned_worker_ids_json: string;
+  order_type: string;
+  hours_half_units: number;
+  hourly_rate_snapshot_cents: number;
   split_type: SplitType;
   status: "active" | "completed";
   tip_cents: number;
@@ -102,8 +111,14 @@ function normalizePricingSnapshot(value: unknown): OrderPricingSnapshot {
     throw new Error("订单价格快照无效");
   }
   const snapshot = value as Partial<OrderPricingSnapshot>;
+  const orderType = normalizeOrderType(snapshot.order_type);
   return {
     ...(snapshot as OrderPricingSnapshot),
+    order_type: orderType,
+    hourly_rate: orderType === "companion"
+      ? fromCents(toCents(Number(snapshot.hourly_rate ?? 0)))
+      : 0,
+    base_price: fromCents(toCents(Number(snapshot.base_price ?? 0))),
     commission_mode: normalizeCommissionMode(snapshot.commission_mode),
     club_commission_rate: normalizeCommissionRate(
       snapshot.club_commission_rate,
@@ -183,6 +198,8 @@ function seedSnapshot(
 ): OrderPricingSnapshot {
   return {
     service_name: serviceName,
+    order_type: "escort",
+    hourly_rate: 0,
     base_price: basePrice,
     commission_mode: "uniform",
     club_commission_rate: commission,
@@ -252,15 +269,17 @@ async function readClubData(): Promise<ClubData> {
   const db = getD1();
   const [workerResult, menuResult, orderResult] = await Promise.all([
     db.prepare("SELECT id, name, tier, status, total_completed_orders FROM workers ORDER BY tier, name").all<WorkerRow>(),
-    db.prepare("SELECT id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu ORDER BY id").all<MenuRow>(),
-    db.prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders ORDER BY created_at DESC").all<OrderRow>(),
+    db.prepare("SELECT id, service_name, order_type, base_price_cents, hourly_rate_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu ORDER BY id").all<MenuRow>(),
+    db.prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders ORDER BY created_at DESC").all<OrderRow>(),
   ]);
 
   const workers: Worker[] = workerResult.results.map((row) => ({ ...row }));
   const menu: PriceMenuItem[] = menuResult.results.map((row) => ({
     id: row.id,
     service_name: row.service_name,
+    order_type: normalizeOrderType(row.order_type),
     base_price: fromCents(row.base_price_cents),
+    hourly_rate: fromCents(row.hourly_rate_cents),
     commission_mode: normalizeCommissionMode(row.commission_mode),
     club_commission_rate: row.club_commission_bps / 100,
     tier_commission_rates: normalizeTierCommissionRates(row.tier_commission_rates_json),
@@ -272,10 +291,19 @@ async function readClubData(): Promise<ClubData> {
     const pricingSnapshot = parsePricingSnapshot(row.pricing_snapshot_json);
     const amounts = orderAmountsFromRow(row, pricingSnapshot);
     const assignedWorkerIds = JSON.parse(row.assigned_worker_ids_json) as string[];
+    const orderType = normalizeOrderType(row.order_type ?? pricingSnapshot.order_type);
     return {
       id: row.id,
       menu_item_id: row.menu_item_id,
       assigned_worker_ids: assignedWorkerIds,
+      order_type: orderType,
+      hours: orderType === "companion"
+        ? normalizeCompanionHours(row.hours_half_units / 2)
+        : null,
+      hourly_rate_snapshot:
+        orderType === "companion"
+          ? fromCents(row.hourly_rate_snapshot_cents)
+          : null,
       split_type: row.split_type ?? pricingSnapshot.split_type,
       status: row.status,
       tip: fromCents(row.tip_cents),
@@ -363,6 +391,11 @@ export async function POST(request: Request) {
       const itemId = String(rawItem.id ?? "").trim();
       const serviceName = String(rawItem.service_name ?? "").trim();
       const splitType = String(rawItem.split_type ?? "") as SplitType;
+      const rawOrderType = rawItem.order_type ?? "escort";
+      if (rawOrderType !== "escort" && rawOrderType !== "companion") {
+        throw new Error("请选择有效订单类型");
+      }
+      const orderType = rawOrderType as OrderType;
       const rawCommissionMode = rawItem.commission_mode ?? "uniform";
       if (rawCommissionMode !== "uniform" && rawCommissionMode !== "by_tier") {
         throw new Error("请选择有效抽成模式");
@@ -387,7 +420,13 @@ export async function POST(request: Request) {
       const item: PriceMenuItem = {
         id: itemId,
         service_name: serviceName,
-        base_price: fromCents(toCents(Number(rawItem.base_price))),
+        order_type: orderType,
+        base_price: orderType === "escort"
+          ? fromCents(toCents(Number(rawItem.base_price)))
+          : 0,
+        hourly_rate: orderType === "companion"
+          ? fromCents(toCents(Number(rawItem.hourly_rate)))
+          : 0,
         commission_mode: commissionMode,
         club_commission_rate: normalizeCommissionRate(
           rawItem.club_commission_rate,
@@ -405,7 +444,6 @@ export async function POST(request: Request) {
           : null,
         eligible_tiers: eligibleTiers,
       };
-      if (toCents(item.base_price) <= 0) throw new Error("基础价格必须大于 0");
       if (
         item.split_type === "tiered" &&
         (!Number.isFinite(item.tiered_ratios?.["1档"]) ||
@@ -416,11 +454,13 @@ export async function POST(request: Request) {
       validateMenuRule(item);
 
       const result = await db
-        .prepare("INSERT INTO price_menu (id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM price_menu WHERE service_name = ? COLLATE NOCASE)")
+        .prepare("INSERT INTO price_menu (id, service_name, order_type, base_price_cents, hourly_rate_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM price_menu WHERE service_name = ? COLLATE NOCASE)")
         .bind(
           item.id,
           item.service_name,
+          item.order_type,
           toCents(item.base_price),
+          toCents(item.hourly_rate),
           item.commission_mode,
           Math.round(item.club_commission_rate * 100),
           JSON.stringify(item.tier_commission_rates),
@@ -501,7 +541,7 @@ export async function POST(request: Request) {
     if (action === "delete_historical_order") {
       const orderId = String(payload.order_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "completed") {
@@ -532,7 +572,7 @@ export async function POST(request: Request) {
       }
 
       const orderResult = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders")
         .all<OrderRow>();
       const relatedOrders = orderResult.results.filter((order) =>
         (JSON.parse(order.assigned_worker_ids_json) as string[]).includes(workerId),
@@ -569,7 +609,7 @@ export async function POST(request: Request) {
       const orderId = String(payload.order_id ?? "");
       const oldWorkerId = String(payload.old_worker_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "active") {
@@ -590,7 +630,7 @@ export async function POST(request: Request) {
 
       const [menuRow, workerResult] = await Promise.all([
         db
-          .prepare("SELECT id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu WHERE id = ?")
+          .prepare("SELECT id, service_name, order_type, base_price_cents, hourly_rate_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu WHERE id = ?")
           .bind(row.menu_item_id)
           .first<MenuRow>(),
         db
@@ -671,11 +711,14 @@ export async function POST(request: Request) {
       const createdAt = new Date().toISOString();
       const [insertResult, , , deleteResult] = await db.batch([
         db
-          .prepare("INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
+          .prepare("INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
           .bind(
             newOrderId,
             row.menu_item_id,
             JSON.stringify(newAssignedWorkerIds),
+            normalizeOrderType(row.order_type ?? newSnapshot.order_type),
+            row.hours_half_units,
+            row.hourly_rate_snapshot_cents,
             newSnapshot.split_type,
             JSON.stringify(specialRequirements),
             amounts.basePriceSnapshotCents,
@@ -710,6 +753,11 @@ export async function POST(request: Request) {
       const itemId = String(rawItem.id ?? "").trim();
       const serviceName = String(rawItem.service_name ?? "").trim();
       const splitType = String(rawItem.split_type ?? "") as SplitType;
+      const rawOrderType = rawItem.order_type ?? "escort";
+      if (rawOrderType !== "escort" && rawOrderType !== "companion") {
+        throw new Error("请选择有效订单类型");
+      }
+      const orderType = rawOrderType as OrderType;
       const rawCommissionMode = rawItem.commission_mode ?? "uniform";
       if (!itemId || itemId.length > 128) throw new Error("服务 ID 无效");
       if (Array.from(serviceName).length > 60) throw new Error("服务名称最多 60 个字符");
@@ -729,7 +777,13 @@ export async function POST(request: Request) {
       const item: PriceMenuItem = {
         id: itemId,
         service_name: serviceName,
-        base_price: fromCents(toCents(Number(rawItem.base_price))),
+        order_type: orderType,
+        base_price: orderType === "escort"
+          ? fromCents(toCents(Number(rawItem.base_price)))
+          : 0,
+        hourly_rate: orderType === "companion"
+          ? fromCents(toCents(Number(rawItem.hourly_rate)))
+          : 0,
         commission_mode: rawCommissionMode,
         club_commission_rate: normalizeCommissionRate(
           rawItem.club_commission_rate,
@@ -758,10 +812,12 @@ export async function POST(request: Request) {
       }
       validateMenuRule(item);
       const result = await db
-        .prepare("UPDATE price_menu SET service_name = ?, base_price_cents = ?, commission_mode = ?, club_commission_bps = ?, tier_commission_rates_json = ?, split_type = ?, tiered_ratios_json = ?, eligible_tiers_json = ?, updated_at = ? WHERE id = ?")
+        .prepare("UPDATE price_menu SET service_name = ?, order_type = ?, base_price_cents = ?, hourly_rate_cents = ?, commission_mode = ?, club_commission_bps = ?, tier_commission_rates_json = ?, split_type = ?, tiered_ratios_json = ?, eligible_tiers_json = ?, updated_at = ? WHERE id = ?")
         .bind(
           item.service_name.trim(),
+          item.order_type,
           toCents(item.base_price),
+          toCents(item.hourly_rate),
           item.commission_mode,
           Math.round(item.club_commission_rate * 100),
           JSON.stringify(item.tier_commission_rates),
@@ -789,7 +845,7 @@ export async function POST(request: Request) {
       }
 
       const menuRow = await db
-        .prepare("SELECT id, service_name, base_price_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu WHERE id = ?")
+        .prepare("SELECT id, service_name, order_type, base_price_cents, hourly_rate_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu WHERE id = ?")
         .bind(menuItemId)
         .first<MenuRow>();
       if (!menuRow) throw new Error("服务项目不存在");
@@ -814,7 +870,22 @@ export async function POST(request: Request) {
         ? (JSON.parse(menuRow.tiered_ratios_json) as TieredRatios)
         : null;
       const payoutWeights = buildPayoutWeights(menuRow.split_type, selectedWorkers, ratios);
-      const basePriceSnapshotCents = menuRow.base_price_cents;
+      const orderType = normalizeOrderType(menuRow.order_type);
+      const hours = orderType === "companion"
+        ? normalizeCompanionHours(payload.hours ?? 1)
+        : null;
+      const hourlyRateSnapshotCents = orderType === "companion"
+        ? menuRow.hourly_rate_cents
+        : 0;
+      const basePriceSnapshot = calculateOrderBasePrice(
+        {
+          order_type: orderType,
+          base_price: fromCents(menuRow.base_price_cents),
+          hourly_rate: fromCents(menuRow.hourly_rate_cents),
+        },
+        hours ?? 1,
+      );
+      const basePriceSnapshotCents = toCents(basePriceSnapshot);
       const specialTotalCents = toCents(
         specialRequirementsTotal(specialRequirements),
       );
@@ -827,7 +898,9 @@ export async function POST(request: Request) {
       toCents(totalPrice);
       const snapshot: OrderPricingSnapshot = {
         service_name: menuRow.service_name,
-        base_price: fromCents(menuRow.base_price_cents),
+        order_type: orderType,
+        hourly_rate: fromCents(hourlyRateSnapshotCents),
+        base_price: basePriceSnapshot,
         commission_mode: normalizeCommissionMode(menuRow.commission_mode),
         club_commission_rate: menuRow.club_commission_bps / 100,
         tier_commission_rates: normalizeTierCommissionRates(
@@ -843,10 +916,13 @@ export async function POST(request: Request) {
       const createdAt = new Date().toISOString();
       const idleCheck = `SELECT COUNT(*) FROM workers WHERE id IN (${placeholders}) AND status = 'idle'`;
       const [insertResult] = await db.batch([
-        db.prepare(`INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE (${idleCheck}) = ? AND EXISTS (SELECT 1 FROM price_menu WHERE id = ?)`).bind(
+        db.prepare(`INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE (${idleCheck}) = ? AND EXISTS (SELECT 1 FROM price_menu WHERE id = ?)`).bind(
           orderId,
           menuItemId,
           JSON.stringify(workerIds),
+          orderType,
+          hours === null ? 0 : Math.round(hours * 2),
+          hourlyRateSnapshotCents,
           snapshot.split_type,
           JSON.stringify(specialRequirements),
           basePriceSnapshotCents,
@@ -870,7 +946,7 @@ export async function POST(request: Request) {
     if (action === "finish_order") {
       const orderId = String(payload.order_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "active") {
