@@ -16,6 +16,7 @@ import {
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
+  type Over,
 } from "@dnd-kit/core";
 import {
   arrayMove,
@@ -23,11 +24,16 @@ import {
   SortableContext,
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
+  type SortingStrategy,
 } from "@dnd-kit/sortable";
 import { motion } from "framer-motion";
 import { FolderPlus, PencilLine, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { SortableItem, type SortableBindings } from "@/components/dnd/SortableList";
+import {
+  restrictToVerticalAxis,
+  SortableItem,
+  type SortableBindings,
+} from "@/components/dnd/SortableList";
 import { FolderSection } from "@/components/folders/FolderSection";
 import {
   AlertDialog,
@@ -88,14 +94,76 @@ function folderIdFromData(data: Record<string, unknown> | undefined) {
   return typeof data?.folderId === "string" ? data.folderId : null;
 }
 
-/** 优先命中鼠标正下方的文件夹标题/空白投放区，再回退到最近中心。 */
+function collisionData(
+  args: Parameters<CollisionDetection>[0],
+  id: string | number,
+) {
+  return args.droppableContainers.find((container) => container.id === id)?.data.current;
+}
+
+function deepestFirst(
+  args: Parameters<CollisionDetection>[0],
+  collisions: ReturnType<typeof pointerWithin>,
+) {
+  return [...collisions].sort((left, right) => {
+    const leftDepth = Number(collisionData(args, left.id)?.depth ?? -1);
+    const rightDepth = Number(collisionData(args, right.id)?.depth ?? -1);
+    return rightDepth - leftDepth;
+  });
+}
+
+/**
+ * Pointer hits win, but a large parent container must never hide the concrete
+ * card below it. Gaps in a populated grid fall back to the nearest card center.
+ */
 const collisionDetection: CollisionDetection = (args) => {
-  const directHits = pointerWithin(args);
-  const containerHits = directHits.filter((hit) =>
-    args.droppableContainers.find((container) => container.id === hit.id)?.data.current?.type === "container"
-  );
-  if (containerHits.length) return containerHits;
-  return directHits.length ? directHits : closestCenter(args);
+  const activeType = args.active.data.current?.type;
+  const directHits = pointerWithin(args).filter((hit) => hit.id !== args.active.id);
+  const hits = (predicate: (data: Record<string, unknown> | undefined) => boolean) =>
+    deepestFirst(
+      args,
+      directHits.filter((hit) => predicate(collisionData(args, hit.id))),
+    );
+
+  if (activeType === "menu") {
+    const menuHits = hits((data) => data?.type === "menu");
+    if (menuHits.length) return menuHits;
+
+    const headerHits = hits((data) => data?.dropRole === "folder-header");
+    if (headerHits.length) return headerHits;
+
+    const zoneHits = hits((data) => data?.dropRole === "item-zone");
+    if (zoneHits.length) {
+      const zoneData = collisionData(args, zoneHits[0].id);
+      if (zoneData?.hasItems) {
+        const nearestMenu = closestCenter(args).filter((hit) => {
+          const data = collisionData(args, hit.id);
+          return hit.id !== args.active.id &&
+            data?.type === "menu" &&
+            folderIdFromData(data) === folderIdFromData(zoneData);
+        });
+        if (nearestMenu.length) return nearestMenu;
+      }
+      return zoneHits;
+    }
+
+    const folderHits = hits((data) => data?.type === "folder");
+    if (folderHits.length) return folderHits;
+  } else {
+    const headerHits = hits((data) => data?.dropRole === "folder-header");
+    if (headerHits.length) return headerHits;
+
+    const folderHits = hits((data) => data?.type === "folder");
+    if (folderHits.length) return folderHits;
+
+    const menuHits = hits((data) => data?.type === "menu");
+    if (menuHits.length) return menuHits;
+
+    const zoneHits = hits((data) => data?.dropRole === "item-zone");
+    if (zoneHits.length) return zoneHits;
+  }
+
+  return closestCenter(args).filter((hit) => hit.id !== args.active.id);
 };
 
 function MenuDropZone({
@@ -104,6 +172,8 @@ function MenuDropZone({
   disabled,
   contentClassName,
   emptyLabel,
+  depth,
+  strategy,
   renderItem,
 }: {
   folderId: string | null;
@@ -111,6 +181,8 @@ function MenuDropZone({
   disabled: boolean;
   contentClassName?: string;
   emptyLabel: string;
+  depth: number;
+  strategy: SortingStrategy;
   renderItem: (
     item: PriceMenuItem,
     bindings: SortableBindings | null,
@@ -119,19 +191,25 @@ function MenuDropZone({
 }) {
   const { setNodeRef, isOver } = useDroppable({
     id: `items:${folderId ?? ROOT_KEY}`,
-    data: { type: "container", folderId },
+    data: {
+      type: "container",
+      dropRole: "item-zone",
+      folderId,
+      depth,
+      hasItems: items.length > 0,
+    },
     disabled,
   });
 
   return (
     <SortableContext
       items={items.map((item) => menuSortableId(item.id))}
-      strategy={rectSortingStrategy}
+      strategy={strategy}
     >
       <div
         ref={setNodeRef}
         className={cn(
-          "min-h-24 rounded-b-[24px] p-3 transition-colors sm:p-4",
+          "min-h-24 rounded-b-[24px] p-3 transition-colors duration-200 sm:p-4",
           isOver && "bg-[#007AFF]/[0.045]",
           contentClassName,
         )}
@@ -140,7 +218,7 @@ function MenuDropZone({
           <SortableItem
             key={item.id}
             id={menuSortableId(item.id)}
-            data={{ type: "menu", itemId: item.id, folderId }}
+            data={{ type: "menu", itemId: item.id, folderId, depth }}
             disabled={disabled}
           >
             {(bindings) => renderItem(item, bindings, false)}
@@ -189,21 +267,36 @@ export function ServiceFolderBoard({
   const expansionReadyRef = useRef(false);
   const [nameDialog, setNameDialog] = useState<NameDialogState | null>(null);
   const [deletingFolder, setDeletingFolder] = useState<Folder | null>(null);
+  const [previewMenu, setPreviewMenu] = useState<PriceMenuItem[] | null>(null);
+  const [previewFolders, setPreviewFolders] = useState<Folder[] | null>(null);
+  const previewMenuRef = useRef<PriceMenuItem[] | null>(null);
+  const previewFoldersRef = useRef<Folder[] | null>(null);
+  const lastOverRef = useRef<Over | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 7 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 280, tolerance: 7 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const folderTree = useMemo(() => buildFolderTree(folders), [folders]);
+  // The order desk is a responsive card grid; price management is a true
+  // vertical list. Each receives the dnd-kit strategy that matches its layout.
+  const itemSortingStrategy = contentClassName?.includes("grid-cols-")
+    ? rectSortingStrategy
+    : verticalListSortingStrategy;
+  const visibleMenu = previewMenu ?? menu;
+  const visibleFolders = previewFolders ?? folders;
+  const folderTree = useMemo(() => buildFolderTree(visibleFolders), [visibleFolders]);
   const folderById = useMemo(
     () => new Map(folders.map((folder) => [folder.id, folder])),
     [folders],
   );
-  const validFolderIds = useMemo(() => new Set(folders.map((folder) => folder.id)), [folders]);
+  const validFolderIds = useMemo(
+    () => new Set(visibleFolders.map((folder) => folder.id)),
+    [visibleFolders],
+  );
   const itemsByFolder = useMemo(() => {
     const groups = new Map<string, PriceMenuItem[]>();
-    menu.forEach((item) => {
+    visibleMenu.forEach((item) => {
       const rawFolderId = item.folderId ?? null;
       const safeFolderId = rawFolderId && validFolderIds.has(rawFolderId) ? rawFolderId : null;
       const key = folderKey(safeFolderId);
@@ -213,7 +306,7 @@ export function ServiceFolderBoard({
       items.sort((a, b) => a.order - b.order || a.service_name.localeCompare(b.service_name, "zh-CN"));
     });
     return groups;
-  }, [menu, validFolderIds]);
+  }, [validFolderIds, visibleMenu]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -267,17 +360,68 @@ export function ServiceFolderBoard({
     setActiveType(null);
     setHighlightedFolder(undefined);
     setInvalidFolder(undefined);
+    setPreviewMenu(null);
+    setPreviewFolders(null);
+    previewMenuRef.current = null;
+    previewFoldersRef.current = null;
+    lastOverRef.current = null;
   }
 
   function onDragStart(event: DragStartEvent) {
     const type = event.active.data.current?.type;
     setActiveId(String(event.active.id));
     setActiveType(type === "folder" ? "folder" : "menu");
+    previewMenuRef.current = menu;
+    previewFoldersRef.current = folders;
+    setPreviewMenu(menu);
+    setPreviewFolders(folders);
+    lastOverRef.current = null;
+  }
+
+  function previewItemContainer(itemId: string, destination: string | null) {
+    const current = previewMenuRef.current ?? menu;
+    const moving = current.find((item) => item.id === itemId);
+    if (!moving || (moving.folderId ?? null) === destination) return;
+
+    const targetItems = current.filter(
+      (item) => item.id !== itemId && (item.folderId ?? null) === destination,
+    );
+    const nextOrder = targetItems.length
+      ? Math.max(...targetItems.map((item) => item.order)) + 1
+      : 0;
+    const next = current.map((item) =>
+      item.id === itemId ? { ...item, folderId: destination, order: nextOrder } : item,
+    );
+    previewMenuRef.current = next;
+    setPreviewMenu(next);
+  }
+
+  function previewFolderContainer(folderId: string, destination: string | null) {
+    const current = previewFoldersRef.current ?? folders;
+    const moving = current.find((folder) => folder.id === folderId);
+    if (!moving || normalizedParent(moving) === destination) return;
+
+    const targetFolders = current.filter(
+      (folder) => folder.id !== folderId && normalizedParent(folder) === destination,
+    );
+    const nextOrder = targetFolders.length
+      ? Math.max(...targetFolders.map((folder) => folder.order)) + 1
+      : 0;
+    const next = current.map((folder) =>
+      folder.id === folderId
+        ? { ...folder, parentId: destination, order: nextOrder }
+        : folder,
+    );
+    previewFoldersRef.current = next;
+    setPreviewFolders(next);
   }
 
   function onDragOver(event: DragOverEvent) {
     const activeData = event.active.data.current;
     const overData = event.over?.data.current;
+    if (event.over && event.over.id !== event.active.id) {
+      lastOverRef.current = event.over;
+    }
     if (!activeData || !overData) {
       setHighlightedFolder(undefined);
       setInvalidFolder(undefined);
@@ -290,8 +434,12 @@ export function ServiceFolderBoard({
       destination = overType === "folder"
         ? String(overData.folderId ?? "") || undefined
         : folderIdFromData(overData);
-    } else if (activeData.type === "folder" && overType === "container") {
-      destination = folderIdFromData(overData);
+    } else if (activeData.type === "folder") {
+      if (overType === "folder") {
+        destination = typeof overData.parentId === "string" ? overData.parentId : null;
+      } else if (overType === "container" || overType === "menu") {
+        destination = folderIdFromData(overData);
+      }
     }
 
     if (destination === undefined) {
@@ -307,8 +455,17 @@ export function ServiceFolderBoard({
     );
     setHighlightedFolder(invalid ? undefined : destination);
     setInvalidFolder(invalid ? destination : undefined);
-    if (!invalid && typeof destination === "string") {
-      setOpenFolders((current) => ({ ...current, [destination]: true }));
+    if (!invalid) {
+      if (activeData.type === "menu") {
+        previewItemContainer(String(activeData.itemId ?? ""), destination);
+      } else {
+        previewFolderContainer(sourceFolderId, destination);
+      }
+      if (typeof destination === "string") {
+        setOpenFolders((current) =>
+          current[destination] === true ? current : { ...current, [destination]: true },
+        );
+      }
     }
   }
 
@@ -359,7 +516,10 @@ export function ServiceFolderBoard({
 
   async function onDragEnd(event: DragEndEvent) {
     const activeData = event.active.data.current;
-    const overData = event.over?.data.current;
+    const effectiveOver = event.over && event.over.id !== event.active.id
+      ? event.over
+      : lastOverRef.current;
+    const overData = effectiveOver?.data.current;
     resetDragState();
     if (!activeData || !overData) return;
 
@@ -447,7 +607,12 @@ export function ServiceFolderBoard({
       <SortableItem
         key={node.id}
         id={folderSortableId(node.id)}
-        data={{ type: "folder", folderId: node.id, parentId: node.parentId }}
+        data={{
+          type: "folder",
+          folderId: node.id,
+          parentId: node.parentId,
+          depth: node.depth,
+        }}
         disabled={isMutating}
       >
         {(bindings) => (
@@ -459,6 +624,7 @@ export function ServiceFolderBoard({
             invalidDrop={invalidFolder === node.id}
             dragBindings={bindings}
             disabled={isMutating}
+            depth={node.depth}
             onToggle={() => toggleFolder(node.id)}
             onAddChild={() => setNameDialog({
               mode: "add",
@@ -485,6 +651,8 @@ export function ServiceFolderBoard({
                 disabled={isMutating}
                 contentClassName={contentClassName}
                 emptyLabel={node.children.length ? "把服务拖到此文件夹" : emptyLabel}
+                depth={node.depth + 1}
+                strategy={itemSortingStrategy}
                 renderItem={renderItem}
               />
             </div>
@@ -517,6 +685,7 @@ export function ServiceFolderBoard({
       <DndContext
         sensors={sensors}
         collisionDetection={collisionDetection}
+        modifiers={activeType === "folder" ? [restrictToVerticalAxis] : undefined}
         onDragStart={onDragStart}
         onDragOver={onDragOver}
         onDragCancel={resetDragState}
@@ -529,6 +698,7 @@ export function ServiceFolderBoard({
           highlighted={highlightedFolder === null}
           invalidDrop={invalidFolder === null}
           disabled={isMutating}
+          depth={-1}
           onToggle={() => toggleFolder(null)}
         >
           <div className="space-y-3 p-3 sm:p-4">
@@ -548,6 +718,8 @@ export function ServiceFolderBoard({
               disabled={isMutating}
               contentClassName={contentClassName}
               emptyLabel={folderTree.length ? "把服务拖到未分类区域" : emptyLabel}
+              depth={0}
+              strategy={itemSortingStrategy}
               renderItem={renderItem}
             />
           </div>
@@ -556,16 +728,18 @@ export function ServiceFolderBoard({
         <DragOverlay dropAnimation={{ duration: 220, easing: "ease-out" }}>
           {activeItem ? (
             <motion.div
-              initial={{ opacity: 0.7, scale: 0.98 }}
-              animate={{ opacity: 1, scale: 1.02 }}
-              className="cursor-grabbing rounded-[22px] shadow-[0_30px_100px_rgba(0,0,0,.58)]"
+              initial={{ opacity: 0.72, scale: 0.98 }}
+              animate={{ opacity: 0.9, scale: 1.03 }}
+              transition={{ duration: 0.16, ease: "easeOut" }}
+              className="cursor-grabbing rounded-[22px] shadow-[0_34px_110px_rgba(0,0,0,.64)]"
             >
               {renderItem(activeItem, null, true)}
             </motion.div>
           ) : activeFolder ? (
             <motion.div
-              initial={{ opacity: 0.7, scale: 0.98 }}
-              animate={{ opacity: 1, scale: 1.02 }}
+              initial={{ opacity: 0.72, scale: 0.98 }}
+              animate={{ opacity: 0.9, scale: 1.03 }}
+              transition={{ duration: 0.16, ease: "easeOut" }}
               className="flex min-w-72 items-center gap-3 rounded-2xl border border-[#64D2FF]/35 bg-[#1c1c1e]/95 px-4 py-3 text-white shadow-[0_30px_100px_rgba(0,0,0,.58)] backdrop-blur-xl"
             >
               <FolderPlus className="size-5 text-[#64D2FF]" />

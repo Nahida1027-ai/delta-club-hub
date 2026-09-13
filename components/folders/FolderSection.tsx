@@ -17,6 +17,7 @@ export function FolderSection({
   invalidDrop,
   dragBindings,
   disabled,
+  depth = 0,
   onToggle,
   onAddChild,
   onRename,
@@ -30,6 +31,7 @@ export function FolderSection({
   invalidDrop?: boolean;
   dragBindings?: SortableBindings | null;
   disabled?: boolean;
+  depth?: number;
   onToggle: () => void;
   onAddChild?: () => void;
   onRename?: () => void;
@@ -39,7 +41,7 @@ export function FolderSection({
   const folderId = folder?.id ?? null;
   const { setNodeRef, isOver } = useDroppable({
     id: `container:${folderId ?? "root"}`,
-    data: { type: "container", folderId },
+    data: { type: "container", dropRole: "folder-header", folderId, depth },
     disabled,
   });
   const isHighlighted = highlighted || isOver;
