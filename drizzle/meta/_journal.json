@@ -43,6 +43,13 @@
       "when": 1789203168153,
       "tag": "0005_serious_mach_iv",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1789261595521,
+      "tag": "0006_nested_folders",
+      "breakpoints": true
     }
   ]
 }

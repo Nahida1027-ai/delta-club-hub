@@ -29,6 +29,11 @@ import {
   toCents,
   validateMenuRule,
 } from "@/lib/settlement";
+import { getDescendantFolderIds, isDescendant } from "@/lib/folder-tree";
+import {
+  isWorkerEligibleForMenuItem,
+  isWorkerEligibleForRule,
+} from "@/lib/worker-eligibility";
 
 interface ApiData extends ClubData {
   created_order_id?: string;
@@ -55,9 +60,9 @@ interface ClubStore extends ClubData {
   error: string | null;
   last_synced_at: string | null;
   load: () => Promise<void>;
-  addWorker: (data: { name: string; tier: WorkerTier; workerType?: WorkerType }) => Promise<Worker>;
+  addWorker: (data: { name: string; tier: WorkerTier | null; workerType?: WorkerType }) => Promise<Worker>;
   addMenuItem: (data: MenuItemInput) => Promise<PriceMenuItem>;
-  updateWorker: (id: string, data: { name: string; tier: WorkerTier; workerType: WorkerType }) => Promise<void>;
+  updateWorker: (id: string, data: { name: string; tier: WorkerTier | null; workerType: WorkerType }) => Promise<void>;
   deleteWorker: (id: string) => Promise<void>;
   deleteHistoricalOrder: (orderId: string) => Promise<void>;
   cancelAndReassign: (orderId: string, oldWorkerId: string) => Promise<ReassignmentResult>;
@@ -65,11 +70,12 @@ interface ClubStore extends ClubData {
   deleteMenuItem: (menuItemId: string) => Promise<void>;
   reorderWorkers: (newOrder: string[]) => Promise<void>;
   reorderMenuItems: (newOrder: string[]) => Promise<void>;
-  reorderFolders: (newOrder: string[]) => Promise<void>;
-  addFolder: (name: string) => Promise<Folder>;
+  reorderFolders: (parentId: string | null, newOrder: string[]) => Promise<void>;
+  addFolder: (name: string, parentId: string | null) => Promise<Folder>;
   renameFolder: (folderId: string, newName: string) => Promise<void>;
   deleteFolder: (folderId: string) => Promise<void>;
   moveItemToFolder: (itemId: string, folderId: string | null) => Promise<void>;
+  moveFolderToFolder: (folderId: string, targetParentId: string | null) => Promise<void>;
   createOrder: (
     menuItemId: string,
     workerIds: string[],
@@ -108,15 +114,21 @@ function findReplacementWorker(
   if (!oldWeight) throw new Error("该打手不属于当前订单");
 
   const menuItem = data.menu.find((item) => item.id === order.menu_item_id);
-  const eligibleTiers = order.pricing_snapshot.split_type === "tiered"
-    ? [oldWeight.tier]
-    : menuItem?.eligible_tiers ?? [oldWeight.tier];
+  if (!menuItem) return undefined;
+  const assignmentRule = {
+    commission_mode: order.pricing_snapshot.commission_mode,
+    split_type: order.pricing_snapshot.split_type,
+    eligible_tiers:
+      order.pricing_snapshot.split_type === "tiered" && oldWeight.tier
+        ? [oldWeight.tier]
+        : menuItem.eligible_tiers,
+  };
 
   return data.workers.find((worker) => {
     if (
       worker.status !== "idle" ||
       order.assigned_worker_ids.includes(worker.id) ||
-      !eligibleTiers.includes(worker.tier)
+      !isWorkerEligibleForRule(assignmentRule, worker)
     ) {
       return false;
     }
@@ -160,6 +172,12 @@ function validateWorkerType(value: unknown): WorkerType {
   if (value === undefined || value === null || value === "standard") return "standard";
   if (value === "entertainment") return "entertainment";
   throw new Error("请选择有效打手类型");
+}
+
+function validateWorkerTier(value: unknown, workerType: WorkerType): WorkerTier | null {
+  if (workerType === "entertainment") return null;
+  if (value === "1档" || value === "2档" || value === "3档") return value;
+  throw new Error("普通打手必须选择档位");
 }
 
 function validateFolderName(value: string) {
@@ -229,10 +247,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     const name = data.name.trim();
     if (!name) throw new Error("请输入打手姓名");
     if (Array.from(name).length > 20) throw new Error("打手姓名最多 20 个字符");
-    if (!["1档", "2档", "3档"].includes(data.tier)) {
-      throw new Error("请选择有效档位");
-    }
     const workerType = validateWorkerType(data.workerType);
+    const tier = validateWorkerTier(data.tier, workerType);
     if (
       state.workers.some(
         (worker) => worker.name.trim().toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"),
@@ -244,7 +260,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     const worker: Worker = {
       id: crypto.randomUUID(),
       name,
-      tier: data.tier,
+      tier,
       workerType,
       order: state.workers.length
         ? Math.max(...state.workers.map((current) => current.order)) + 1
@@ -408,21 +424,31 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 
-  reorderFolders: async (newOrder) => {
+  reorderFolders: async (parentId, newOrder) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
-    validateExactOrder(newOrder, state.folders.map((folder) => folder.id), "文件夹");
+    const normalizedParentId = parentId ?? null;
+    const siblings = state.folders.filter(
+      (folder) => (folder.parentId ?? null) === normalizedParentId,
+    );
+    validateExactOrder(newOrder, siblings.map((folder) => folder.id), "文件夹");
     const orderById = new Map(newOrder.map((id, index) => [id, index]));
     const previous = clubSnapshot(state);
     set({
-      folders: [...state.folders]
-        .map((folder) => ({ ...folder, order: orderById.get(folder.id) ?? folder.order }))
-        .sort((a, b) => a.order - b.order),
+      folders: state.folders.map((folder) =>
+        orderById.has(folder.id)
+          ? { ...folder, order: orderById.get(folder.id) ?? folder.order }
+          : folder,
+      ),
       is_mutating: true,
       error: null,
     });
     try {
-      const result = await apiRequest({ action: "reorder_folders", folder_ids: newOrder });
+      const result = await apiRequest({
+        action: "reorder_folders",
+        parent_id: normalizedParentId,
+        folder_ids: newOrder,
+      });
       set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
     } catch (error) {
       set({ ...previous, is_mutating: false });
@@ -430,17 +456,31 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 
-  addFolder: async (value) => {
+  addFolder: async (value, parentId) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
     const name = validateFolderName(value);
-    if (state.folders.some((folder) => folder.name.toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"))) {
-      throw new Error("已存在同名文件夹");
+    const normalizedParentId = parentId ?? null;
+    if (
+      normalizedParentId !== null &&
+      !state.folders.some((folder) => folder.id === normalizedParentId)
+    ) {
+      throw new Error("父文件夹不存在");
     }
+    if (state.folders.some((folder) =>
+      (folder.parentId ?? null) === normalizedParentId &&
+      folder.name.toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN")
+    )) {
+      throw new Error("同一层级已存在同名文件夹");
+    }
+    const siblings = state.folders.filter(
+      (folder) => (folder.parentId ?? null) === normalizedParentId,
+    );
     const folder: Folder = {
       id: crypto.randomUUID(),
       name,
-      order: state.folders.length ? Math.max(...state.folders.map((item) => item.order)) + 1 : 0,
+      parentId: normalizedParentId,
+      order: siblings.length ? Math.max(...siblings.map((item) => item.order)) + 1 : 0,
       createdAt: Date.now(),
     };
     const previous = clubSnapshot(state);
@@ -459,9 +499,14 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
     const name = validateFolderName(value);
-    if (!state.folders.some((folder) => folder.id === folderId)) throw new Error("未找到该文件夹");
-    if (state.folders.some((folder) => folder.id !== folderId && folder.name.toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"))) {
-      throw new Error("已存在同名文件夹");
+    const target = state.folders.find((folder) => folder.id === folderId);
+    if (!target) throw new Error("未找到该文件夹");
+    if (state.folders.some((folder) =>
+      folder.id !== folderId &&
+      (folder.parentId ?? null) === (target.parentId ?? null) &&
+      folder.name.toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN")
+    )) {
+      throw new Error("同一层级已存在同名文件夹");
     }
     const previous = clubSnapshot(state);
     set({
@@ -482,15 +527,39 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
     if (!state.folders.some((folder) => folder.id === folderId)) throw new Error("未找到该文件夹");
+    const descendantIds = getDescendantFolderIds(state.folders, folderId);
+    const subtreeIds = new Set([folderId, ...descendantIds]);
     const rootItems = state.menu.filter((item) => item.folderId === null);
     const nextRootOrder = rootItems.length ? Math.max(...rootItems.map((item) => item.order)) + 1 : 0;
     const movedItems = state.menu
-      .filter((item) => item.folderId === folderId)
-      .sort((a, b) => a.order - b.order);
+      .filter((item) => item.folderId !== null && subtreeIds.has(item.folderId))
+      .sort((a, b) =>
+        (a.folderId ?? "").localeCompare(b.folderId ?? "") ||
+        a.order - b.order ||
+        a.service_name.localeCompare(b.service_name, "zh-CN"),
+      );
     const movedOrderById = new Map(movedItems.map((item, index) => [item.id, nextRootOrder + index]));
+    const rootFolders = state.folders.filter((folder) => (folder.parentId ?? null) === null);
+    const nextRootFolderOrder = rootFolders.length
+      ? Math.max(...rootFolders.map((folder) => folder.order)) + 1
+      : 0;
+    const descendants = state.folders
+      .filter((folder) => descendantIds.includes(folder.id))
+      .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt);
+    const descendantOrderById = new Map(
+      descendants.map((folder, index) => [folder.id, nextRootFolderOrder + index]),
+    );
     const previous = clubSnapshot(state);
     set({
-      folders: state.folders.filter((folder) => folder.id !== folderId),
+      folders: state.folders
+        .filter((folder) => folder.id !== folderId)
+        .map((folder) => descendantOrderById.has(folder.id)
+          ? {
+              ...folder,
+              parentId: null,
+              order: descendantOrderById.get(folder.id) ?? folder.order,
+            }
+          : folder),
       menu: state.menu.map((item) => movedOrderById.has(item.id)
         ? { ...item, folderId: null, order: movedOrderById.get(item.id) ?? item.order }
         : item),
@@ -534,6 +603,59 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 
+  moveFolderToFolder: async (folderId, targetParentId) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const folder = state.folders.find((candidate) => candidate.id === folderId);
+    if (!folder) throw new Error("未找到该文件夹");
+    const normalizedParentId = targetParentId ?? null;
+    if (
+      normalizedParentId !== null &&
+      !state.folders.some((candidate) => candidate.id === normalizedParentId)
+    ) {
+      throw new Error("目标文件夹不存在");
+    }
+    if (normalizedParentId === folderId || isDescendant(state.folders, folderId, normalizedParentId)) {
+      throw new Error("不能把文件夹移动到自身或其子文件夹中");
+    }
+    if ((folder.parentId ?? null) === normalizedParentId) return;
+    if (state.folders.some((candidate) =>
+      candidate.id !== folderId &&
+      (candidate.parentId ?? null) === normalizedParentId &&
+      candidate.name.toLocaleLowerCase("zh-CN") === folder.name.toLocaleLowerCase("zh-CN")
+    )) {
+      throw new Error("目标层级已存在同名文件夹");
+    }
+
+    const siblings = state.folders.filter(
+      (candidate) => (candidate.parentId ?? null) === normalizedParentId,
+    );
+    const nextOrder = siblings.length
+      ? Math.max(...siblings.map((candidate) => candidate.order)) + 1
+      : 0;
+    const previous = clubSnapshot(state);
+    set({
+      folders: state.folders.map((candidate) =>
+        candidate.id === folderId
+          ? { ...candidate, parentId: normalizedParentId, order: nextOrder }
+          : candidate,
+      ),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({
+        action: "move_folder_to_folder",
+        folder_id: folderId,
+        target_parent_id: normalizedParentId,
+      });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
   updateWorker: async (id, data) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
@@ -541,18 +663,20 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     if (!worker) throw new Error("未找到该打手");
     const name = data.name.trim();
     if (!name) throw new Error("请输入打手姓名");
-    if (worker.status === "busy" && data.tier !== worker.tier) {
-      throw new Error("该打手正在接单，只能修改姓名");
-    }
+    if (Array.from(name).length > 20) throw new Error("打手姓名最多 20 个字符");
     const workerType = validateWorkerType(data.workerType);
-    if (worker.status === "busy" && workerType !== worker.workerType) {
+    const tier = validateWorkerTier(data.tier, workerType);
+    if (
+      worker.status === "busy" &&
+      (tier !== worker.tier || workerType !== worker.workerType)
+    ) {
       throw new Error("该打手正在接单，只能修改姓名");
     }
 
     const previous = clubSnapshot(state);
     set({
       workers: state.workers.map((candidate) =>
-        candidate.id === id ? { ...candidate, name, tier: data.tier, workerType } : candidate,
+        candidate.id === id ? { ...candidate, name, tier, workerType } : candidate,
       ),
       is_mutating: true,
       error: null,
@@ -561,7 +685,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       const result = await apiRequest({
         action: "update_worker",
         worker_id: id,
-        data: { name, tier: data.tier, workerType },
+        data: { name, tier, workerType },
       });
       set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
     } catch (error) {
@@ -775,8 +899,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     if (selectedWorkers.some((worker) => worker.status !== "idle")) {
       throw new Error("所选打手已被占用");
     }
-    if (selectedWorkers.some((worker) => !menuItem.eligible_tiers.includes(worker.tier))) {
-      throw new Error("所选打手档位不符合该服务规则");
+    if (selectedWorkers.some((worker) => !isWorkerEligibleForMenuItem(menuItem, worker))) {
+      throw new Error("所选打手不符合该服务的档位或抽成规则");
     }
     const payoutWeights = buildPayoutWeights(
       menuItem.split_type,

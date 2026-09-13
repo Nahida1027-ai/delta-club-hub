@@ -1,15 +1,18 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   closestCenter,
   DndContext,
   DragOverlay,
   KeyboardSensor,
+  pointerWithin,
   PointerSensor,
   TouchSensor,
+  useDroppable,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
@@ -24,11 +27,8 @@ import {
 import { motion } from "framer-motion";
 import { FolderPlus, PencilLine, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { SortableItem, type SortableBindings } from "@/components/dnd/SortableList";
 import { FolderSection } from "@/components/folders/FolderSection";
-import {
-  SortableItem,
-  type SortableBindings,
-} from "@/components/dnd/SortableList";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -51,12 +51,22 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { Folder, PriceMenuItem } from "@/lib/club-types";
+import {
+  buildFolderTree,
+  isDescendant,
+  type FolderTreeNode,
+} from "@/lib/folder-tree";
 import { cn } from "@/lib/utils";
 import { useClubStore } from "@/store/use-club-store";
 
 const ROOT_KEY = "root";
+const EXPANSION_STORAGE_KEY = "delta-club-folder-expansion-v2";
 const inputClass =
   "h-11 rounded-xl border-white/10 bg-white/[0.055] text-[15px] text-white shadow-none placeholder:text-white/30 focus-visible:border-[#007AFF]/60 focus-visible:ring-[#007AFF]/20";
+
+type NameDialogState =
+  | { mode: "add"; parentId: string | null; parentName?: string }
+  | { mode: "rename"; folder: Folder };
 
 function menuSortableId(id: string) {
   return `menu:${id}`;
@@ -70,13 +80,80 @@ function folderKey(folderId: string | null) {
   return folderId ?? ROOT_KEY;
 }
 
-function targetFolderId(event: DragOverEvent | DragEndEvent): string | null | undefined {
-  const data = event.over?.data.current;
-  if (!data) return undefined;
-  if (data.type === "container" || data.type === "menu" || data.type === "folder") {
-    return typeof data.folderId === "string" ? data.folderId : null;
-  }
-  return undefined;
+function normalizedParent(folder: Pick<Folder, "parentId">) {
+  return folder.parentId ?? null;
+}
+
+function folderIdFromData(data: Record<string, unknown> | undefined) {
+  return typeof data?.folderId === "string" ? data.folderId : null;
+}
+
+/** 优先命中鼠标正下方的文件夹标题/空白投放区，再回退到最近中心。 */
+const collisionDetection: CollisionDetection = (args) => {
+  const directHits = pointerWithin(args);
+  const containerHits = directHits.filter((hit) =>
+    args.droppableContainers.find((container) => container.id === hit.id)?.data.current?.type === "container"
+  );
+  if (containerHits.length) return containerHits;
+  return directHits.length ? directHits : closestCenter(args);
+};
+
+function MenuDropZone({
+  folderId,
+  items,
+  disabled,
+  contentClassName,
+  emptyLabel,
+  renderItem,
+}: {
+  folderId: string | null;
+  items: PriceMenuItem[];
+  disabled: boolean;
+  contentClassName?: string;
+  emptyLabel: string;
+  renderItem: (
+    item: PriceMenuItem,
+    bindings: SortableBindings | null,
+    isOverlay: boolean,
+  ) => ReactNode;
+}) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: `items:${folderId ?? ROOT_KEY}`,
+    data: { type: "container", folderId },
+    disabled,
+  });
+
+  return (
+    <SortableContext
+      items={items.map((item) => menuSortableId(item.id))}
+      strategy={rectSortingStrategy}
+    >
+      <div
+        ref={setNodeRef}
+        className={cn(
+          "min-h-24 rounded-b-[24px] p-3 transition-colors sm:p-4",
+          isOver && "bg-[#007AFF]/[0.045]",
+          contentClassName,
+        )}
+      >
+        {items.map((item) => (
+          <SortableItem
+            key={item.id}
+            id={menuSortableId(item.id)}
+            data={{ type: "menu", itemId: item.id, folderId }}
+            disabled={disabled}
+          >
+            {(bindings) => renderItem(item, bindings, false)}
+          </SortableItem>
+        ))}
+        {!items.length ? (
+          <div className="grid min-h-20 place-items-center rounded-2xl border border-dashed border-white/10 px-4 text-center text-[13px] text-white/28">
+            {emptyLabel}
+          </div>
+        ) : null}
+      </div>
+    </SortableContext>
+  );
 }
 
 export function ServiceFolderBoard({
@@ -100,14 +177,17 @@ export function ServiceFolderBoard({
   const reorderMenuItems = useClubStore((state) => state.reorderMenuItems);
   const reorderFolders = useClubStore((state) => state.reorderFolders);
   const moveItemToFolder = useClubStore((state) => state.moveItemToFolder);
+  const moveFolderToFolder = useClubStore((state) => state.moveFolderToFolder);
   const addFolder = useClubStore((state) => state.addFolder);
   const renameFolder = useClubStore((state) => state.renameFolder);
   const deleteFolder = useClubStore((state) => state.deleteFolder);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeType, setActiveType] = useState<"menu" | "folder" | null>(null);
   const [highlightedFolder, setHighlightedFolder] = useState<string | null | undefined>();
+  const [invalidFolder, setInvalidFolder] = useState<string | null | undefined>();
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({ [ROOT_KEY]: true });
-  const [nameDialog, setNameDialog] = useState<{ mode: "add" | "rename"; folder?: Folder } | null>(null);
+  const expansionReadyRef = useRef(false);
+  const [nameDialog, setNameDialog] = useState<NameDialogState | null>(null);
   const [deletingFolder, setDeletingFolder] = useState<Folder | null>(null);
 
   const sensors = useSensors(
@@ -115,20 +195,78 @@ export function ServiceFolderBoard({
     useSensor(TouchSensor, { activationConstraint: { delay: 280, tolerance: 7 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const orderedFolders = useMemo(
-    () => [...folders].sort((a, b) => a.order - b.order || a.createdAt - b.createdAt),
+  const folderTree = useMemo(() => buildFolderTree(folders), [folders]);
+  const folderById = useMemo(
+    () => new Map(folders.map((folder) => [folder.id, folder])),
     [folders],
   );
+  const validFolderIds = useMemo(() => new Set(folders.map((folder) => folder.id)), [folders]);
+  const itemsByFolder = useMemo(() => {
+    const groups = new Map<string, PriceMenuItem[]>();
+    menu.forEach((item) => {
+      const rawFolderId = item.folderId ?? null;
+      const safeFolderId = rawFolderId && validFolderIds.has(rawFolderId) ? rawFolderId : null;
+      const key = folderKey(safeFolderId);
+      groups.set(key, [...(groups.get(key) ?? []), item]);
+    });
+    groups.forEach((items) => {
+      items.sort((a, b) => a.order - b.order || a.service_name.localeCompare(b.service_name, "zh-CN"));
+    });
+    return groups;
+  }, [menu, validFolderIds]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      try {
+        const stored = window.localStorage.getItem(EXPANSION_STORAGE_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const restored = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, boolean] =>
+                typeof entry[1] === "boolean"
+              ),
+            );
+            setOpenFolders({ [ROOT_KEY]: true, ...restored });
+          }
+        }
+      } catch {
+        // 展开状态只是本机 UI 偏好；损坏时直接使用默认展开状态。
+      }
+      expansionReadyRef.current = true;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    if (!expansionReadyRef.current) return;
+    try {
+      window.localStorage.setItem(EXPANSION_STORAGE_KEY, JSON.stringify(openFolders));
+    } catch {
+      // 隐私模式或存储配额不足不影响业务数据与拖拽。
+    }
+  }, [openFolders]);
 
   function itemsFor(folderId: string | null) {
-    return menu
-      .filter((item) => item.folderId === folderId)
-      .sort((a, b) => a.order - b.order || a.service_name.localeCompare(b.service_name, "zh-CN"));
+    return itemsByFolder.get(folderKey(folderId)) ?? [];
+  }
+
+  function siblingsFor(parentId: string | null, source = folders) {
+    return source
+      .filter((folder) => normalizedParent(folder) === parentId)
+      .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
   }
 
   function toggleFolder(folderId: string | null) {
     const key = folderKey(folderId);
     setOpenFolders((current) => ({ ...current, [key]: !(current[key] ?? true) }));
+  }
+
+  function resetDragState() {
+    setActiveId(null);
+    setActiveType(null);
+    setHighlightedFolder(undefined);
+    setInvalidFolder(undefined);
   }
 
   function onDragStart(event: DragStartEvent) {
@@ -138,52 +276,160 @@ export function ServiceFolderBoard({
   }
 
   function onDragOver(event: DragOverEvent) {
-    if (event.active.data.current?.type !== "menu") return;
-    const nextFolder = targetFolderId(event);
-    setHighlightedFolder(nextFolder);
-    if (typeof nextFolder === "string") {
-      setOpenFolders((current) => ({ ...current, [nextFolder]: true }));
+    const activeData = event.active.data.current;
+    const overData = event.over?.data.current;
+    if (!activeData || !overData) {
+      setHighlightedFolder(undefined);
+      setInvalidFolder(undefined);
+      return;
+    }
+
+    const overType = overData.type;
+    let destination: string | null | undefined;
+    if (activeData.type === "menu") {
+      destination = overType === "folder"
+        ? String(overData.folderId ?? "") || undefined
+        : folderIdFromData(overData);
+    } else if (activeData.type === "folder" && overType === "container") {
+      destination = folderIdFromData(overData);
+    }
+
+    if (destination === undefined) {
+      setHighlightedFolder(undefined);
+      setInvalidFolder(undefined);
+      return;
+    }
+
+    const sourceFolderId = String(activeData.folderId ?? "");
+    const invalid = activeData.type === "folder" && (
+      destination === sourceFolderId ||
+      isDescendant(folders, sourceFolderId, destination)
+    );
+    setHighlightedFolder(invalid ? undefined : destination);
+    setInvalidFolder(invalid ? destination : undefined);
+    if (!invalid && typeof destination === "string") {
+      setOpenFolders((current) => ({ ...current, [destination]: true }));
+    }
+  }
+
+  async function reorderFolderBeside(
+    folderId: string,
+    overFolderId: string,
+    targetParentId: string | null,
+  ) {
+    let latestFolders = useClubStore.getState().folders;
+    const moving = latestFolders.find((folder) => folder.id === folderId);
+    if (!moving) return;
+    if (normalizedParent(moving) !== targetParentId) {
+      await moveFolderToFolder(folderId, targetParentId);
+      latestFolders = useClubStore.getState().folders;
+    }
+    const siblings = siblingsFor(targetParentId, latestFolders);
+    const oldIndex = siblings.findIndex((folder) => folder.id === folderId);
+    const newIndex = siblings.findIndex((folder) => folder.id === overFolderId);
+    if (oldIndex >= 0 && newIndex >= 0 && oldIndex !== newIndex) {
+      await reorderFolders(
+        targetParentId,
+        arrayMove(siblings.map((folder) => folder.id), oldIndex, newIndex),
+      );
+    }
+  }
+
+  async function reorderMenuBeside(
+    itemId: string,
+    overItemId: string,
+    targetFolderId: string | null,
+  ) {
+    let latestMenu = useClubStore.getState().menu;
+    const moving = latestMenu.find((item) => item.id === itemId);
+    if (!moving) return;
+    if ((moving.folderId ?? null) !== targetFolderId) {
+      await moveItemToFolder(itemId, targetFolderId);
+      latestMenu = useClubStore.getState().menu;
+    }
+    const group = latestMenu
+      .filter((item) => (item.folderId ?? null) === targetFolderId)
+      .sort((a, b) => a.order - b.order || a.service_name.localeCompare(b.service_name, "zh-CN"));
+    const oldIndex = group.findIndex((item) => item.id === itemId);
+    const newIndex = group.findIndex((item) => item.id === overItemId);
+    if (oldIndex >= 0 && newIndex >= 0 && oldIndex !== newIndex) {
+      await reorderMenuItems(arrayMove(group.map((item) => item.id), oldIndex, newIndex));
     }
   }
 
   async function onDragEnd(event: DragEndEvent) {
-    const type = event.active.data.current?.type;
-    const destinationFolder = targetFolderId(event);
-    setActiveId(null);
-    setActiveType(null);
-    setHighlightedFolder(undefined);
-    if (!event.over) return;
+    const activeData = event.active.data.current;
+    const overData = event.over?.data.current;
+    resetDragState();
+    if (!activeData || !overData) return;
 
     try {
-      if (type === "folder") {
-        if (typeof destinationFolder !== "string") return;
-        const oldIndex = orderedFolders.findIndex((folder) => folder.id === event.active.data.current?.folderId);
-        const newIndex = orderedFolders.findIndex((folder) => folder.id === destinationFolder);
-        if (oldIndex >= 0 && newIndex >= 0 && oldIndex !== newIndex) {
-          await reorderFolders(arrayMove(orderedFolders.map((folder) => folder.id), oldIndex, newIndex));
+      if (activeData.type === "folder") {
+        const sourceId = String(activeData.folderId ?? "");
+        if (!sourceId) return;
+
+        if (overData.type === "container") {
+          const targetParentId = folderIdFromData(overData);
+          if (targetParentId === sourceId || isDescendant(folders, sourceId, targetParentId)) {
+            toast.error("不能把文件夹移动到自身或其子文件夹中");
+            return;
+          }
+          const source = folderById.get(sourceId);
+          if (source && normalizedParent(source) !== targetParentId) {
+            await moveFolderToFolder(sourceId, targetParentId);
+            toast.success(targetParentId ? "文件夹已移入目标文件夹" : "文件夹已移回根目录");
+          }
+          return;
+        }
+
+        if (overData.type === "folder") {
+          const overFolderId = String(overData.folderId ?? "");
+          if (!overFolderId || overFolderId === sourceId) return;
+          const targetParentId = typeof overData.parentId === "string" ? overData.parentId : null;
+          if (targetParentId === sourceId || isDescendant(folders, sourceId, targetParentId)) {
+            toast.error("不能把文件夹移动到自身或其子文件夹中");
+            return;
+          }
+          await reorderFolderBeside(sourceId, overFolderId, targetParentId);
+          return;
+        }
+
+        if (overData.type === "menu") {
+          const targetParentId = folderIdFromData(overData);
+          if (targetParentId === sourceId || isDescendant(folders, sourceId, targetParentId)) {
+            toast.error("不能把文件夹移动到自身或其子文件夹中");
+            return;
+          }
+          const source = folderById.get(sourceId);
+          if (source && normalizedParent(source) !== targetParentId) {
+            await moveFolderToFolder(sourceId, targetParentId);
+          }
+          return;
         }
         return;
       }
 
-      const itemId = String(event.active.data.current?.itemId ?? "");
-      const item = menu.find((candidate) => candidate.id === itemId);
-      if (!item || destinationFolder === undefined) return;
-      if (item.folderId !== destinationFolder) {
-        await moveItemToFolder(item.id, destinationFolder);
-        toast.success(destinationFolder ? "服务已移入文件夹" : "服务已移至未分类");
+      const itemId = String(activeData.itemId ?? "");
+      if (!itemId) return;
+      if (overData.type === "menu") {
+        const overItemId = String(overData.itemId ?? "");
+        const targetFolderId = folderIdFromData(overData);
+        if (overItemId && overItemId !== itemId) {
+          await reorderMenuBeside(itemId, overItemId, targetFolderId);
+        }
         return;
       }
 
-      if (event.over.data.current?.type !== "menu") return;
-      const overItemId = String(event.over.data.current.itemId ?? "");
-      const group = itemsFor(item.folderId);
-      const oldIndex = group.findIndex((candidate) => candidate.id === item.id);
-      const newIndex = group.findIndex((candidate) => candidate.id === overItemId);
-      if (oldIndex >= 0 && newIndex >= 0 && oldIndex !== newIndex) {
-        await reorderMenuItems(arrayMove(group.map((candidate) => candidate.id), oldIndex, newIndex));
+      const destinationFolder = overData.type === "folder"
+        ? String(overData.folderId ?? "") || null
+        : folderIdFromData(overData);
+      const item = menu.find((candidate) => candidate.id === itemId);
+      if (item && (item.folderId ?? null) !== destinationFolder) {
+        await moveItemToFolder(item.id, destinationFolder);
+        toast.success(destinationFolder ? "服务已移入文件夹" : "服务已移至未分类");
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "排序保存失败");
+      toast.error(error instanceof Error ? error.message : "拖拽保存失败");
     }
   }
 
@@ -191,43 +437,77 @@ export function ServiceFolderBoard({
     ? menu.find((item) => menuSortableId(item.id) === activeId)
     : null;
   const activeFolder = activeType === "folder"
-    ? orderedFolders.find((folder) => folderSortableId(folder.id) === activeId)
+    ? folders.find((folder) => folderSortableId(folder.id) === activeId)
     : null;
 
-  function renderMenuGroup(folderId: string | null) {
-    const items = itemsFor(folderId);
+  function renderFolderNode(node: FolderTreeNode) {
+    const directItems = itemsFor(node.id);
+    const childCount = node.children.length + directItems.length;
     return (
-      <SortableContext items={items.map((item) => menuSortableId(item.id))} strategy={rectSortingStrategy}>
-        <div className={cn("min-h-24 p-3 sm:p-4", contentClassName)}>
-          {items.map((item) => (
-            <SortableItem
-              key={item.id}
-              id={menuSortableId(item.id)}
-              data={{ type: "menu", itemId: item.id, folderId }}
-              disabled={isMutating}
-            >
-              {(bindings) => renderItem(item, bindings, false)}
-            </SortableItem>
-          ))}
-          {!items.length ? (
-            <div className="grid min-h-20 place-items-center rounded-2xl border border-dashed border-white/10 px-4 text-center text-[13px] text-white/28">
-              {emptyLabel}
+      <SortableItem
+        key={node.id}
+        id={folderSortableId(node.id)}
+        data={{ type: "folder", folderId: node.id, parentId: node.parentId }}
+        disabled={isMutating}
+      >
+        {(bindings) => (
+          <FolderSection
+            folder={node}
+            count={childCount}
+            open={openFolders[node.id] ?? true}
+            highlighted={highlightedFolder === node.id}
+            invalidDrop={invalidFolder === node.id}
+            dragBindings={bindings}
+            disabled={isMutating}
+            onToggle={() => toggleFolder(node.id)}
+            onAddChild={() => setNameDialog({
+              mode: "add",
+              parentId: node.id,
+              parentName: node.name,
+            })}
+            onRename={() => setNameDialog({ mode: "rename", folder: node })}
+            onDelete={() => setDeletingFolder(node)}
+          >
+            <div className="space-y-3 border-l border-[#007AFF]/18 py-3 pl-3 sm:pl-5">
+              {node.children.length ? (
+                <SortableContext
+                  items={node.children.map((child) => folderSortableId(child.id))}
+                  strategy={verticalListSortingStrategy}
+                >
+                  <div className="space-y-3 pr-3 sm:pr-4">
+                    {node.children.map(renderFolderNode)}
+                  </div>
+                </SortableContext>
+              ) : null}
+              <MenuDropZone
+                folderId={node.id}
+                items={directItems}
+                disabled={isMutating}
+                contentClassName={contentClassName}
+                emptyLabel={node.children.length ? "把服务拖到此文件夹" : emptyLabel}
+                renderItem={renderItem}
+              />
             </div>
-          ) : null}
-        </div>
-      </SortableContext>
+          </FolderSection>
+        )}
+      </SortableItem>
     );
   }
+
+  const rootItems = itemsFor(null);
+  const rootCount = folderTree.length + rootItems.length;
 
   return (
     <>
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-sm leading-6 text-white/38">拖动六点手柄调整顺序，也可把服务拖到文件夹标题或“未分类”区域。</p>
+        <p className="text-sm leading-6 text-white/38">
+          拖动六点手柄调整同级顺序；拖到文件夹标题可嵌套，拖到“未分类”可移回根目录。
+        </p>
         <Button
           type="button"
           variant="outline"
           disabled={isMutating}
-          onClick={() => setNameDialog({ mode: "add" })}
+          onClick={() => setNameDialog({ mode: "add", parentId: null })}
           className="h-10 shrink-0 rounded-xl border-[#007AFF]/25 bg-[#007AFF]/10 text-[#64D2FF] hover:bg-[#007AFF]/20 hover:text-white"
         >
           <Plus className="size-4" />新建文件夹
@@ -236,58 +516,42 @@ export function ServiceFolderBoard({
 
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCenter}
+        collisionDetection={collisionDetection}
         onDragStart={onDragStart}
         onDragOver={onDragOver}
-        onDragCancel={() => {
-          setActiveId(null);
-          setActiveType(null);
-          setHighlightedFolder(undefined);
-        }}
+        onDragCancel={resetDragState}
         onDragEnd={(event) => void onDragEnd(event)}
       >
-        <div className="space-y-4">
-          <FolderSection
-            folder={null}
-            count={itemsFor(null).length}
-            open={openFolders[ROOT_KEY] ?? true}
-            highlighted={highlightedFolder === null}
-            disabled={isMutating}
-            onToggle={() => toggleFolder(null)}
-          >
-            {renderMenuGroup(null)}
-          </FolderSection>
-
-          <SortableContext
-            items={orderedFolders.map((folder) => folderSortableId(folder.id))}
-            strategy={verticalListSortingStrategy}
-          >
-            {orderedFolders.map((folder) => (
-              <SortableItem
-                key={folder.id}
-                id={folderSortableId(folder.id)}
-                data={{ type: "folder", folderId: folder.id }}
-                disabled={isMutating}
+        <FolderSection
+          folder={null}
+          count={rootCount}
+          open={openFolders[ROOT_KEY] ?? true}
+          highlighted={highlightedFolder === null}
+          invalidDrop={invalidFolder === null}
+          disabled={isMutating}
+          onToggle={() => toggleFolder(null)}
+        >
+          <div className="space-y-3 p-3 sm:p-4">
+            {folderTree.length ? (
+              <SortableContext
+                items={folderTree.map((folder) => folderSortableId(folder.id))}
+                strategy={verticalListSortingStrategy}
               >
-                {(bindings) => (
-                  <FolderSection
-                    folder={folder}
-                    count={itemsFor(folder.id).length}
-                    open={openFolders[folder.id] ?? true}
-                    highlighted={highlightedFolder === folder.id}
-                    dragBindings={bindings}
-                    disabled={isMutating}
-                    onToggle={() => toggleFolder(folder.id)}
-                    onRename={() => setNameDialog({ mode: "rename", folder })}
-                    onDelete={() => setDeletingFolder(folder)}
-                  >
-                    {renderMenuGroup(folder.id)}
-                  </FolderSection>
-                )}
-              </SortableItem>
-            ))}
-          </SortableContext>
-        </div>
+                <div className="space-y-3">
+                  {folderTree.map(renderFolderNode)}
+                </div>
+              </SortableContext>
+            ) : null}
+            <MenuDropZone
+              folderId={null}
+              items={rootItems}
+              disabled={isMutating}
+              contentClassName={contentClassName}
+              emptyLabel={folderTree.length ? "把服务拖到未分类区域" : emptyLabel}
+              renderItem={renderItem}
+            />
+          </div>
+        </FolderSection>
 
         <DragOverlay dropAnimation={{ duration: 220, easing: "ease-out" }}>
           {activeItem ? (
@@ -312,32 +576,57 @@ export function ServiceFolderBoard({
       </DndContext>
 
       <FolderNameDialog
-        key={nameDialog ? `${nameDialog.mode}:${nameDialog.folder?.id ?? "new"}` : "closed"}
+        key={nameDialog
+          ? nameDialog.mode === "rename"
+            ? `rename:${nameDialog.folder.id}`
+            : `add:${nameDialog.parentId ?? ROOT_KEY}`
+          : "closed"}
         state={nameDialog}
         isMutating={isMutating}
         onOpenChange={(open) => !open && setNameDialog(null)}
         onSave={async (name) => {
-          if (nameDialog?.mode === "rename" && nameDialog.folder) {
+          if (nameDialog?.mode === "rename") {
             await renameFolder(nameDialog.folder.id, name);
             toast.success("文件夹已重命名");
-          } else {
-            await addFolder(name);
-            toast.success("文件夹已创建");
+          } else if (nameDialog?.mode === "add") {
+            const parentId = nameDialog.parentId;
+            await addFolder(name, parentId);
+            if (parentId) {
+              setOpenFolders((current) => ({ ...current, [parentId]: true }));
+            }
+            toast.success(parentId ? "子文件夹已创建" : "文件夹已创建");
           }
           setNameDialog(null);
         }}
       />
 
-      <AlertDialog open={Boolean(deletingFolder)} onOpenChange={(open) => !open && setDeletingFolder(null)}>
+      <AlertDialog
+        open={Boolean(deletingFolder)}
+        onOpenChange={(open) => !open && setDeletingFolder(null)}
+      >
         <AlertDialogContent className="overflow-hidden border-white/10 bg-[#171719]/95 p-0 text-white shadow-2xl backdrop-blur-xl">
-          <motion.div initial={{ opacity: 0, scale: 0.94, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} transition={{ type: "spring", stiffness: 300, damping: 27 }} className="grid gap-5 p-6">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.94, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            transition={{ type: "spring", stiffness: 300, damping: 27 }}
+            className="grid gap-5 p-6"
+          >
             <AlertDialogHeader>
-              <AlertDialogMedia className="mb-2 size-12 rounded-2xl bg-[#FF3B30]/12 text-[#FF6961]"><Trash2 className="size-5" /></AlertDialogMedia>
+              <AlertDialogMedia className="mb-2 size-12 rounded-2xl bg-[#FF3B30]/12 text-[#FF6961]">
+                <Trash2 className="size-5" />
+              </AlertDialogMedia>
               <AlertDialogTitle>删除文件夹</AlertDialogTitle>
-              <AlertDialogDescription className="leading-6 text-white/45">删除后，文件夹内的服务会全部移回“未分类”，服务和历史订单都不会被删除。</AlertDialogDescription>
+              <AlertDialogDescription className="leading-6 text-white/45">
+                删除当前文件夹后，它的全部子文件夹与子树中的服务都会安全移回根目录；服务、订单和收入不会被删除。
+              </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel disabled={isMutating} className="h-11 rounded-xl border-white/10 bg-white/[0.045] text-white/65 hover:bg-white/10 hover:text-white">取消</AlertDialogCancel>
+              <AlertDialogCancel
+                disabled={isMutating}
+                className="h-11 rounded-xl border-white/10 bg-white/[0.045] text-white/65 hover:bg-white/10 hover:text-white"
+              >
+                取消
+              </AlertDialogCancel>
               <AlertDialogAction
                 disabled={isMutating}
                 onClick={(event) => {
@@ -345,7 +634,7 @@ export function ServiceFolderBoard({
                   if (!deletingFolder) return;
                   void deleteFolder(deletingFolder.id)
                     .then(() => {
-                      toast.success("文件夹已删除，服务已移回未分类");
+                      toast.success("文件夹已删除，子内容已移回根目录");
                       setDeletingFolder(null);
                     })
                     .catch((error) => toast.error(error instanceof Error ? error.message : "删除文件夹失败"));
@@ -368,12 +657,12 @@ function FolderNameDialog({
   onOpenChange,
   onSave,
 }: {
-  state: { mode: "add" | "rename"; folder?: Folder } | null;
+  state: NameDialogState | null;
   isMutating: boolean;
   onOpenChange: (open: boolean) => void;
   onSave: (name: string) => Promise<void>;
 }) {
-  const [name, setName] = useState(state?.folder?.name ?? "");
+  const [name, setName] = useState(state?.mode === "rename" ? state.folder.name : "");
   const [error, setError] = useState("");
 
   async function submit() {
@@ -395,25 +684,76 @@ function FolderNameDialog({
     }
   }
 
+  const title = state?.mode === "rename" ? "重命名文件夹" : "新建文件夹";
+  const description = state?.mode === "add" && state.parentName
+    ? `将在“${state.parentName}”中创建子文件夹。`
+    : "文件夹结构会同步显示在接单台和价格表管理中。";
+
   return (
     <Dialog open={Boolean(state)} onOpenChange={(open) => !isMutating && onOpenChange(open)}>
       <DialogContent className="overflow-hidden border-white/10 bg-[#171719]/95 p-0 text-white shadow-2xl backdrop-blur-xl sm:max-w-md">
-        <motion.div initial={{ opacity: 0, scale: 0.94, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} transition={{ type: "spring", stiffness: 300, damping: 27 }} className="grid gap-5 p-6">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.94, y: 10 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ type: "spring", stiffness: 300, damping: 27 }}
+          className="grid gap-5 p-6"
+        >
           <DialogHeader>
             <span className="mb-1 grid size-11 place-items-center rounded-2xl bg-[#007AFF]/15 text-[#64D2FF]">
               {state?.mode === "rename" ? <PencilLine className="size-5" /> : <FolderPlus className="size-5" />}
             </span>
-            <DialogTitle>{state?.mode === "rename" ? "重命名文件夹" : "新建文件夹"}</DialogTitle>
-            <DialogDescription className="text-white/45">名称会同步显示在接单台和价格表管理中。</DialogDescription>
+            <DialogTitle>{title}</DialogTitle>
+            <DialogDescription className="text-white/45">{description}</DialogDescription>
           </DialogHeader>
           <label htmlFor="folder-name" className="space-y-2">
-            <span className="flex items-center justify-between text-sm font-medium text-white/65"><span>文件夹名称</span><span className="text-[12px] font-normal text-white/30">{Array.from(name).length}/20</span></span>
-            <Input id="folder-name" value={name} maxLength={20} autoFocus placeholder="例如：热门推荐" onChange={(event) => { setName(event.target.value); setError(""); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submit(); } }} className={inputClass} aria-invalid={Boolean(error)} aria-describedby={error ? "folder-name-error" : undefined} />
-            {error ? <p id="folder-name-error" role="alert" className="text-[13px] text-[#FF6961]">{error}</p> : null}
+            <span className="flex items-center justify-between text-sm font-medium text-white/65">
+              <span>文件夹名称</span>
+              <span className="text-[12px] font-normal text-white/30">{Array.from(name).length}/20</span>
+            </span>
+            <Input
+              id="folder-name"
+              value={name}
+              maxLength={20}
+              autoFocus
+              placeholder="例如：热门推荐"
+              onChange={(event) => {
+                setName(event.target.value);
+                setError("");
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void submit();
+                }
+              }}
+              className={inputClass}
+              aria-invalid={Boolean(error)}
+              aria-describedby={error ? "folder-name-error" : undefined}
+            />
+            {error ? (
+              <p id="folder-name-error" role="alert" className="text-[13px] text-[#FF6961]">
+                {error}
+              </p>
+            ) : null}
           </label>
           <DialogFooter>
-            <Button type="button" variant="ghost" disabled={isMutating} onClick={() => onOpenChange(false)} className="h-11 rounded-xl text-white/60 hover:bg-white/[0.06] hover:text-white">取消</Button>
-            <Button type="button" disabled={isMutating || !name.trim()} onClick={() => void submit()} className="h-11 rounded-xl bg-gradient-to-r from-[#007AFF] to-[#5AC8FA] text-white hover:brightness-110">{isMutating ? "正在保存…" : "确认保存"}</Button>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={isMutating}
+              onClick={() => onOpenChange(false)}
+              className="h-11 rounded-xl text-white/60 hover:bg-white/[0.06] hover:text-white"
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={isMutating || !name.trim()}
+              onClick={() => void submit()}
+              className="h-11 rounded-xl bg-gradient-to-r from-[#007AFF] to-[#5AC8FA] text-white hover:brightness-110"
+            >
+              {isMutating ? "正在保存…" : "确认保存"}
+            </Button>
           </DialogFooter>
         </motion.div>
       </DialogContent>

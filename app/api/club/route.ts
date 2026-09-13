@@ -33,13 +33,18 @@ import {
   toCents,
   validateMenuRule,
 } from "@/lib/settlement";
+import { getDescendantFolderIds, isDescendant } from "@/lib/folder-tree";
+import {
+  isWorkerEligibleForMenuItem,
+  isWorkerEligibleForRule,
+} from "@/lib/worker-eligibility";
 
 export const runtime = "edge";
 
 interface WorkerRow {
   id: string;
   name: string;
-  tier: WorkerTier;
+  tier: string;
   worker_type: string;
   sort_order: number;
   status: "idle" | "busy";
@@ -49,6 +54,7 @@ interface WorkerRow {
 interface FolderRow {
   id: string;
   name: string;
+  parent_id: string | null;
   sort_order: number;
   created_at: number;
 }
@@ -102,6 +108,31 @@ function normalizeWorkerType(value: unknown): WorkerType {
   throw new Error("请选择有效打手类型");
 }
 
+function normalizeWorkerTier(value: unknown, workerType: WorkerType): WorkerTier | null {
+  if (workerType === "entertainment") return null;
+  if (value === "1档" || value === "2档" || value === "3档") return value;
+  throw new Error("普通打手必须选择档位");
+}
+
+function normalizeSnapshotTier(value: unknown): WorkerTier | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (value === "1档" || value === "2档" || value === "3档") return value;
+  throw new Error("订单打手档位快照无效");
+}
+
+function workerFromRow(row: WorkerRow): Worker {
+  const workerType = normalizeWorkerType(row.worker_type);
+  return {
+    id: row.id,
+    name: row.name,
+    tier: normalizeWorkerTier(row.tier, workerType),
+    workerType,
+    order: row.sort_order,
+    status: row.status,
+    total_completed_orders: row.total_completed_orders,
+  };
+}
+
 function normalizeFolderName(value: unknown) {
   const name = String(value ?? "").trim();
   if (!name) throw new Error("请输入文件夹名称");
@@ -147,6 +178,7 @@ function normalizePricingSnapshot(value: unknown): OrderPricingSnapshot {
   }
   const snapshot = value as Partial<OrderPricingSnapshot>;
   const orderType = normalizeOrderType(snapshot.order_type);
+  if (!Array.isArray(snapshot.payout_weights)) throw new Error("订单打手快照无效");
   return {
     ...(snapshot as OrderPricingSnapshot),
     order_type: orderType,
@@ -162,6 +194,10 @@ function normalizePricingSnapshot(value: unknown): OrderPricingSnapshot {
     tier_commission_rates: normalizeTierCommissionRates(
       snapshot.tier_commission_rates,
     ),
+    payout_weights: snapshot.payout_weights.map((entry) => ({
+      ...entry,
+      tier: normalizeSnapshotTier(entry.tier),
+    })),
   };
 }
 
@@ -305,19 +341,11 @@ async function readClubData(): Promise<ClubData> {
   const [workerResult, menuResult, folderResult, orderResult] = await Promise.all([
     db.prepare("SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders FROM workers ORDER BY sort_order, id").all<WorkerRow>(),
     db.prepare("SELECT id, service_name, folder_id, sort_order, order_type, base_price_cents, hourly_rate_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu ORDER BY sort_order, id").all<MenuRow>(),
-    db.prepare("SELECT id, name, sort_order, created_at FROM folders ORDER BY sort_order, created_at, id").all<FolderRow>(),
+    db.prepare("SELECT id, name, parent_id, sort_order, created_at FROM folders ORDER BY parent_id, sort_order, created_at, id").all<FolderRow>(),
     db.prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders ORDER BY created_at DESC").all<OrderRow>(),
   ]);
 
-  const workers: Worker[] = workerResult.results.map((row) => ({
-    id: row.id,
-    name: row.name,
-    tier: row.tier,
-    workerType: normalizeWorkerType(row.worker_type),
-    order: row.sort_order,
-    status: row.status,
-    total_completed_orders: row.total_completed_orders,
-  }));
+  const workers: Worker[] = workerResult.results.map(workerFromRow);
   const menu: PriceMenuItem[] = menuResult.results.map((row) => ({
     id: row.id,
     service_name: row.service_name,
@@ -336,6 +364,7 @@ async function readClubData(): Promise<ClubData> {
   const folders: Folder[] = folderResult.results.map((row) => ({
     id: row.id,
     name: row.name,
+    parentId: row.parent_id ?? null,
     order: row.sort_order,
     createdAt: row.created_at,
   }));
@@ -409,16 +438,15 @@ export async function POST(request: Request) {
       const rawWorker = (payload.worker ?? {}) as Record<string, unknown>;
       const workerId = String(rawWorker.id ?? "").trim();
       const name = String(rawWorker.name ?? "").trim();
-      const tier = String(rawWorker.tier ?? "") as WorkerTier;
       const workerType = normalizeWorkerType(rawWorker.workerType);
+      const tier = normalizeWorkerTier(rawWorker.tier, workerType);
       if (!workerId || workerId.length > 128) throw new Error("打手 ID 无效");
       if (!name) throw new Error("请输入打手姓名");
       if (Array.from(name).length > 20) throw new Error("打手姓名最多 20 个字符");
-      if (!["1档", "2档", "3档"].includes(tier)) throw new Error("请选择有效档位");
 
       const result = await db
         .prepare("INSERT INTO workers (id, name, tier, worker_type, sort_order, status, total_completed_orders) SELECT ?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM workers), 0), 'idle', 0 WHERE NOT EXISTS (SELECT 1 FROM workers WHERE name = ? COLLATE NOCASE)")
-        .bind(workerId, name, tier, workerType, name)
+        .bind(workerId, name, tier ?? "", workerType, name)
         .run();
       if (!result.meta.changes) {
         return Response.json(
@@ -590,7 +618,13 @@ export async function POST(request: Request) {
 
     if (action === "reorder_folders") {
       const ids = parseOrderedIds(payload.folder_ids, "文件夹");
-      const existing = await db.prepare("SELECT id FROM folders").all<{ id: string }>();
+      const parentId = typeof payload.parent_id === "string" && payload.parent_id.trim()
+        ? payload.parent_id.trim()
+        : null;
+      const existing = await db
+        .prepare("SELECT id FROM folders WHERE parent_id IS ?")
+        .bind(parentId)
+        .all<{ id: string }>();
       if (
         ids.length !== existing.results.length ||
         existing.results.some((folder) => !ids.includes(folder.id))
@@ -599,7 +633,8 @@ export async function POST(request: Request) {
       }
       if (ids.length) {
         await db.batch(ids.map((id, index) =>
-          db.prepare("UPDATE folders SET sort_order = ? WHERE id = ?").bind(index, id),
+          db.prepare("UPDATE folders SET sort_order = ? WHERE id = ? AND parent_id IS ?")
+            .bind(index, id, parentId),
         ));
       }
       return Response.json(await readClubData());
@@ -609,15 +644,22 @@ export async function POST(request: Request) {
       const rawFolder = (payload.folder ?? {}) as Record<string, unknown>;
       const id = String(rawFolder.id ?? "").trim();
       const name = normalizeFolderName(rawFolder.name);
+      const parentId = typeof rawFolder.parentId === "string" && rawFolder.parentId.trim()
+        ? rawFolder.parentId.trim()
+        : null;
       const createdAt = Number(rawFolder.createdAt ?? Date.now());
       if (!id || id.length > 128) throw new Error("文件夹 ID 无效");
       if (!Number.isSafeInteger(createdAt) || createdAt <= 0) throw new Error("文件夹创建时间无效");
+      if (parentId) {
+        const parent = await db.prepare("SELECT id FROM folders WHERE id = ?").bind(parentId).first<{ id: string }>();
+        if (!parent) throw new Error("父文件夹不存在");
+      }
       const result = await db
-        .prepare("INSERT INTO folders (id, name, sort_order, created_at) SELECT ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM folders), 0), ? WHERE NOT EXISTS (SELECT 1 FROM folders WHERE name = ? COLLATE NOCASE)")
-        .bind(id, name, createdAt, name)
+        .prepare("INSERT INTO folders (id, name, parent_id, sort_order, created_at) SELECT ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM folders WHERE parent_id IS ?), 0), ? WHERE NOT EXISTS (SELECT 1 FROM folders WHERE parent_id IS ? AND name = ? COLLATE NOCASE)")
+        .bind(id, name, parentId, parentId, createdAt, parentId, name)
         .run();
       if (!result.meta.changes) {
-        return Response.json({ error: "已存在同名文件夹" }, { status: 409 });
+        return Response.json({ error: "同一层级已存在同名文件夹" }, { status: 409 });
       }
       return Response.json(await readClubData());
     }
@@ -625,33 +667,104 @@ export async function POST(request: Request) {
     if (action === "rename_folder") {
       const folderId = String(payload.folder_id ?? "").trim();
       const name = normalizeFolderName(payload.name);
+      const existing = await db
+        .prepare("SELECT id, parent_id FROM folders WHERE id = ?")
+        .bind(folderId)
+        .first<{ id: string; parent_id: string | null }>();
+      if (!existing) throw new Error("未找到该文件夹");
       const result = await db
-        .prepare("UPDATE folders SET name = ? WHERE id = ? AND NOT EXISTS (SELECT 1 FROM folders AS duplicate WHERE duplicate.name = ? COLLATE NOCASE AND duplicate.id <> ?)")
-        .bind(name, folderId, name, folderId)
+        .prepare("UPDATE folders SET name = ? WHERE id = ? AND NOT EXISTS (SELECT 1 FROM folders AS duplicate WHERE duplicate.parent_id IS ? AND duplicate.name = ? COLLATE NOCASE AND duplicate.id <> ?)")
+        .bind(name, folderId, existing.parent_id, name, folderId)
         .run();
       if (!result.meta.changes) {
-        const existing = await db.prepare("SELECT id FROM folders WHERE id = ?").bind(folderId).first<{ id: string }>();
-        if (!existing) throw new Error("未找到该文件夹");
-        return Response.json({ error: "已存在同名文件夹" }, { status: 409 });
+        return Response.json({ error: "同一层级已存在同名文件夹" }, { status: 409 });
       }
       return Response.json(await readClubData());
     }
 
     if (action === "delete_folder") {
       const folderId = String(payload.folder_id ?? "").trim();
-      const folder = await db.prepare("SELECT id FROM folders WHERE id = ?").bind(folderId).first<{ id: string }>();
+      const folderRows = await db
+        .prepare("SELECT id, name, parent_id, sort_order, created_at FROM folders")
+        .all<FolderRow>();
+      const folder = folderRows.results.find((row) => row.id === folderId);
       if (!folder) throw new Error("未找到该文件夹");
-      const [rootOrder, itemResult] = await Promise.all([
+      const folderData: Folder[] = folderRows.results.map((row) => ({
+        id: row.id,
+        name: row.name,
+        parentId: row.parent_id ?? null,
+        order: row.sort_order,
+        createdAt: row.created_at,
+      }));
+      const descendantIds = getDescendantFolderIds(folderData, folderId);
+      const subtreeIds = [folderId, ...descendantIds];
+      const placeholders = subtreeIds.map(() => "?").join(", ");
+      const [rootItemOrder, rootFolderOrder, itemResult] = await Promise.all([
         db.prepare("SELECT COALESCE(MAX(sort_order) + 1, 0) AS value FROM price_menu WHERE folder_id IS NULL").first<{ value: number }>(),
-        db.prepare("SELECT id FROM price_menu WHERE folder_id = ? ORDER BY sort_order, id").bind(folderId).all<{ id: string }>(),
+        db.prepare("SELECT COALESCE(MAX(sort_order) + 1, 0) AS value FROM folders WHERE parent_id IS NULL").first<{ value: number }>(),
+        db.prepare(`SELECT id FROM price_menu WHERE folder_id IN (${placeholders}) ORDER BY folder_id, sort_order, id`)
+          .bind(...subtreeIds)
+          .all<{ id: string }>(),
       ]);
-      const nextOrder = rootOrder?.value ?? 0;
+      const nextItemOrder = rootItemOrder?.value ?? 0;
+      const nextFolderOrder = rootFolderOrder?.value ?? 0;
       const statements = itemResult.results.map((item, index) =>
-        db.prepare("UPDATE price_menu SET folder_id = NULL, sort_order = ? WHERE id = ? AND folder_id = ?")
-          .bind(nextOrder + index, item.id, folderId),
+        db.prepare("UPDATE price_menu SET folder_id = NULL, sort_order = ? WHERE id = ?")
+          .bind(nextItemOrder + index, item.id),
       );
+      const descendants = folderData
+        .filter((candidate) => descendantIds.includes(candidate.id))
+        .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+      descendants.forEach((candidate, index) => {
+        statements.push(
+          db.prepare("UPDATE folders SET parent_id = NULL, sort_order = ? WHERE id = ?")
+            .bind(nextFolderOrder + index, candidate.id),
+        );
+      });
       statements.push(db.prepare("DELETE FROM folders WHERE id = ?").bind(folderId));
       await db.batch(statements);
+      return Response.json(await readClubData());
+    }
+
+    if (action === "move_folder_to_folder") {
+      const folderId = String(payload.folder_id ?? "").trim();
+      const targetParentId = typeof payload.target_parent_id === "string" && payload.target_parent_id.trim()
+        ? payload.target_parent_id.trim()
+        : null;
+      const folderRows = await db
+        .prepare("SELECT id, name, parent_id, sort_order, created_at FROM folders")
+        .all<FolderRow>();
+      const folders: Folder[] = folderRows.results.map((row) => ({
+        id: row.id,
+        name: row.name,
+        parentId: row.parent_id ?? null,
+        order: row.sort_order,
+        createdAt: row.created_at,
+      }));
+      const folder = folders.find((candidate) => candidate.id === folderId);
+      if (!folder) throw new Error("未找到该文件夹");
+      if (targetParentId !== null && !folders.some((candidate) => candidate.id === targetParentId)) {
+        throw new Error("目标文件夹不存在");
+      }
+      if (targetParentId === folderId || isDescendant(folders, folderId, targetParentId)) {
+        return Response.json({ error: "不能把文件夹移动到自身或其子文件夹中" }, { status: 409 });
+      }
+      if ((folder.parentId ?? null) === targetParentId) return Response.json(await readClubData());
+      const duplicate = folders.some((candidate) =>
+        candidate.id !== folderId &&
+        (candidate.parentId ?? null) === targetParentId &&
+        candidate.name.toLocaleLowerCase("zh-CN") === folder.name.toLocaleLowerCase("zh-CN")
+      );
+      if (duplicate) {
+        return Response.json({ error: "目标层级已存在同名文件夹" }, { status: 409 });
+      }
+      const nextOrder = await db
+        .prepare("SELECT COALESCE(MAX(sort_order) + 1, 0) AS value FROM folders WHERE parent_id IS ?")
+        .bind(targetParentId)
+        .first<{ value: number }>();
+      await db.prepare("UPDATE folders SET parent_id = ?, sort_order = ? WHERE id = ?")
+        .bind(targetParentId, nextOrder?.value ?? 0, folderId)
+        .run();
       return Response.json(await readClubData());
     }
 
@@ -709,26 +822,28 @@ export async function POST(request: Request) {
       const workerId = String(payload.worker_id ?? "");
       const data = (payload.data ?? {}) as Record<string, unknown>;
       const name = String(data.name ?? "").trim();
-      const tier = String(data.tier ?? "") as WorkerTier;
       const workerType = normalizeWorkerType(data.workerType);
+      const tier = normalizeWorkerTier(data.tier, workerType);
       if (!name) throw new Error("请输入打手姓名");
-      if (!["1档", "2档", "3档"].includes(tier)) throw new Error("请选择有效档位");
+      if (Array.from(name).length > 20) throw new Error("打手姓名最多 20 个字符");
 
       const existing = await db
         .prepare("SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders FROM workers WHERE id = ?")
         .bind(workerId)
         .first<WorkerRow>();
       if (!existing) throw new Error("未找到该打手");
+      const existingType = normalizeWorkerType(existing.worker_type);
+      const existingTier = normalizeWorkerTier(existing.tier, existingType);
       if (
         existing.status === "busy" &&
-        (tier !== existing.tier || workerType !== normalizeWorkerType(existing.worker_type))
+        (tier !== existingTier || workerType !== existingType)
       ) {
         return Response.json({ error: "该打手正在接单，只能修改姓名" }, { status: 409 });
       }
 
       const result = await db
         .prepare("UPDATE workers SET name = ?, tier = ?, worker_type = ? WHERE id = ? AND (status = 'idle' OR (tier = ? AND worker_type = ?))")
-        .bind(name, tier, workerType, workerId, tier, workerType)
+        .bind(name, tier ?? "", workerType, workerId, tier ?? "", workerType)
         .run();
       if (!result.meta.changes) {
         return Response.json({ error: "打手状态刚刚发生变化，请重试" }, { status: 409 });
@@ -841,14 +956,19 @@ export async function POST(request: Request) {
         return Response.json({ error: "原打手当前不在接单" }, { status: 409 });
       }
 
-      const eligibleTiers = snapshot.split_type === "tiered"
-        ? [oldWeight.tier]
-        : (JSON.parse(menuRow.eligible_tiers_json) as WorkerTier[]);
-      const replacement = workerResult.results.find((worker) => {
+      const assignmentRule = {
+        commission_mode: snapshot.commission_mode,
+        split_type: snapshot.split_type,
+        eligible_tiers:
+          snapshot.split_type === "tiered" && oldWeight.tier
+            ? [oldWeight.tier]
+            : (JSON.parse(menuRow.eligible_tiers_json) as WorkerTier[]),
+      };
+      const replacement = workerResult.results.map(workerFromRow).find((worker) => {
         if (
           worker.status !== "idle" ||
           assignedWorkerIds.includes(worker.id) ||
-          !eligibleTiers.includes(worker.tier)
+          !isWorkerEligibleForRule(assignmentRule, worker)
         ) {
           return false;
         }
@@ -1059,23 +1179,20 @@ export async function POST(request: Request) {
       const selectedWorkers = workerIds
         .map((id) => workersById.get(id))
         .filter(Boolean)
-        .map((worker) => ({
-          id: worker!.id,
-          name: worker!.name,
-          tier: worker!.tier,
-          workerType: normalizeWorkerType(worker!.worker_type),
-          order: worker!.sort_order,
-          status: worker!.status,
-          total_completed_orders: worker!.total_completed_orders,
-        })) as Worker[];
+        .map((worker) => workerFromRow(worker!)) as Worker[];
       if (selectedWorkers.length !== workerIds.length) throw new Error("所选打手不存在");
       if (selectedWorkers.some((worker) => worker.status !== "idle")) {
         throw new Error("所选打手已被其他订单占用，请重新选择");
       }
 
       const eligibleTiers = JSON.parse(menuRow.eligible_tiers_json) as WorkerTier[];
-      if (selectedWorkers.some((worker) => !eligibleTiers.includes(worker.tier))) {
-        throw new Error("所选打手档位不符合该服务规则");
+      const assignmentRule = {
+        commission_mode: normalizeCommissionMode(menuRow.commission_mode),
+        split_type: menuRow.split_type,
+        eligible_tiers: eligibleTiers,
+      };
+      if (selectedWorkers.some((worker) => !isWorkerEligibleForMenuItem(assignmentRule, worker))) {
+        throw new Error("所选打手不符合该服务的档位或抽成规则");
       }
       const ratios = menuRow.tiered_ratios_json
         ? (JSON.parse(menuRow.tiered_ratios_json) as TieredRatios)
@@ -1112,7 +1229,7 @@ export async function POST(request: Request) {
         order_type: orderType,
         hourly_rate: fromCents(hourlyRateSnapshotCents),
         base_price: basePriceSnapshot,
-        commission_mode: normalizeCommissionMode(menuRow.commission_mode),
+        commission_mode: assignmentRule.commission_mode,
         club_commission_rate: menuRow.club_commission_bps / 100,
         tier_commission_rates: normalizeTierCommissionRates(
           menuRow.tier_commission_rates_json,

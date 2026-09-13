@@ -152,9 +152,12 @@ export function getCommissionRate(
     club_commission_rate: number;
     tier_commission_rates?: TierCommissionRates;
   },
-  workerTier: WorkerTier,
+  workerTier: WorkerTier | null,
 ) {
   if ((input.commission_mode ?? "uniform") === "by_tier") {
+    if (workerTier === null) {
+      throw new Error("娱乐陪玩不能参与按档位抽成订单");
+    }
     return input.tier_commission_rates?.[workerTier] ?? 0;
   }
   return input.club_commission_rate;

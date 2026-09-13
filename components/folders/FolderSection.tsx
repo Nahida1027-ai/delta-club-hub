@@ -2,7 +2,7 @@
 
 import { useDroppable } from "@dnd-kit/core";
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronDown, Folder, FolderOpen, PencilLine, Trash2 } from "lucide-react";
+import { Ban, ChevronDown, Folder, FolderOpen, FolderPlus, PencilLine, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Folder as ClubFolder } from "@/lib/club-types";
 import { cn } from "@/lib/utils";
@@ -14,9 +14,11 @@ export function FolderSection({
   count,
   open,
   highlighted,
+  invalidDrop,
   dragBindings,
   disabled,
   onToggle,
+  onAddChild,
   onRename,
   onDelete,
   children,
@@ -25,9 +27,11 @@ export function FolderSection({
   count: number;
   open: boolean;
   highlighted?: boolean;
+  invalidDrop?: boolean;
   dragBindings?: SortableBindings | null;
   disabled?: boolean;
   onToggle: () => void;
+  onAddChild?: () => void;
   onRename?: () => void;
   onDelete?: () => void;
   children: ReactNode;
@@ -42,15 +46,19 @@ export function FolderSection({
 
   return (
     <section
-      ref={setNodeRef}
       className={cn(
         "overflow-hidden rounded-[24px] border bg-[#151517]/62 shadow-[0_18px_52px_rgba(0,0,0,.18)] backdrop-blur-xl transition-colors",
-        isHighlighted
+        invalidDrop
+          ? "border-[#FF453A]/55 bg-[#FF3B30]/[0.08] shadow-[0_20px_60px_rgba(255,59,48,.13)]"
+          : isHighlighted
           ? "border-[#64D2FF]/55 bg-[#007AFF]/[0.09] shadow-[0_20px_60px_rgba(0,122,255,.16)]"
           : "border-white/[0.08]",
       )}
     >
-      <div className="group flex min-h-15 items-center gap-2 border-b border-white/[0.06] px-3 py-3 sm:px-4">
+      <div
+        ref={setNodeRef}
+        className="group flex min-h-15 items-center gap-2 border-b border-white/[0.06] px-3 py-3 sm:px-4"
+      >
         {folder ? (
           <SortableHandle
             bindings={dragBindings}
@@ -79,14 +87,25 @@ export function FolderSection({
             <span className="block truncate text-[15px] font-semibold text-white">
               {folder?.name ?? "未分类"}
             </span>
-            <span className="mt-0.5 block text-[12px] text-white/34">{count} 个服务</span>
+            <span className="mt-0.5 block text-[12px] text-white/34">{count} 项内容</span>
           </span>
           <motion.span animate={{ rotate: open ? 180 : 0 }} className="ml-auto text-white/30">
-            <ChevronDown className="size-4" />
+            {invalidDrop ? <Ban className="size-4 text-[#FF6961]" /> : <ChevronDown className="size-4" />}
           </motion.span>
         </button>
         {folder ? (
           <div className="flex shrink-0 gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              disabled={disabled}
+              aria-label={`在 ${folder.name} 中新建子文件夹`}
+              onClick={onAddChild}
+              className="rounded-xl text-[#7EF29A]/75 hover:bg-[#30D158]/12 hover:text-[#7EF29A]"
+            >
+              <FolderPlus className="size-4" />
+            </Button>
             <Button
               type="button"
               variant="ghost"

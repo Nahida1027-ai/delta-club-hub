@@ -111,6 +111,7 @@ import {
 } from "@/lib/settlement";
 import { useClubStore } from "@/store/use-club-store";
 import { useClubWebMcp } from "@/hooks/use-club-webmcp";
+import { isWorkerEligibleForMenuItem } from "@/lib/worker-eligibility";
 
 const glassCard =
   "rounded-[22px] border border-white/[0.08] bg-[#1c1c1e]/75 shadow-[0_18px_50px_rgba(0,0,0,0.22)] backdrop-blur-md";
@@ -337,6 +338,7 @@ function Dashboard({
         id: worker.id,
         name: worker.name,
         tier: worker.tier,
+        workerType: worker.workerType,
         orders: relevant.length,
         income: relevant.reduce(
           (sum, order) =>
@@ -458,7 +460,13 @@ function Dashboard({
                     {worker.name}
                   </span>
                 </TableCell>
-                <TableCell><TierBadge tier={worker.tier} /></TableCell>
+                <TableCell>
+                  {worker.workerType === "entertainment" || worker.tier === null ? (
+                    <Badge className="border-[#BF5AF2]/25 bg-[#BF5AF2]/12 text-[#D9A0FF]">娱乐陪玩</Badge>
+                  ) : (
+                    <TierBadge tier={worker.tier} />
+                  )}
+                </TableCell>
                 <TableCell className="text-right font-medium text-white/70">{worker.orders}</TableCell>
                 <TableCell className="pr-5 text-right font-semibold text-white sm:pr-6">{formatMoney(worker.income)}</TableCell>
               </TableRow>
@@ -470,7 +478,14 @@ function Dashboard({
   );
 }
 
-function TierBadge({ tier }: { tier: WorkerTier }) {
+function TierBadge({ tier }: { tier: WorkerTier | null }) {
+  if (tier === null) {
+    return (
+      <Badge className="border-[#BF5AF2]/25 bg-[#BF5AF2]/12 text-[#D9A0FF]">
+        娱乐陪玩
+      </Badge>
+    );
+  }
   const styles = {
     "1档": "border-[#FFD60A]/25 bg-[#FFD60A]/10 text-[#FFE36E]",
     "2档": "border-[#64D2FF]/25 bg-[#64D2FF]/10 text-[#8BE0FF]",
@@ -533,7 +548,7 @@ function OrderDesk({
         contentClassName="grid items-stretch gap-4 lg:grid-cols-3"
         renderItem={(item, dragBindings, isOverlay) => {
           const available = workers.filter(
-            (worker) => worker.status === "idle" && item.eligible_tiers.includes(worker.tier),
+            (worker) => worker.status === "idle" && isWorkerEligibleForMenuItem(item, worker),
           ).length;
           return (
             <article className={`${glassCard} group relative flex h-full min-h-[318px] flex-col overflow-hidden p-5 sm:p-6`}>
@@ -556,7 +571,7 @@ function OrderDesk({
                 </p>
                 <div className="mt-4"><ServiceRule item={item} /></div>
                 {!available || (item.split_type !== "single" && available < 2) ? (
-                  <p className="mt-3 text-sm text-[#FF6961]">匹配的空闲打手不足，暂时无法派单</p>
+                  <p className="mt-3 text-sm text-[#FF6961]">可用打手不足，请调整服务配置或等待打手空闲</p>
                 ) : null}
                 <div className="mt-auto pt-6">
                   <Button
@@ -723,7 +738,7 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                   </div>
                   <div className="flex shrink-0 items-start gap-1.5">
                     <div className="flex flex-col items-end gap-1.5">
-                      <TierBadge tier={worker.tier} />
+                      {worker.workerType === "standard" && worker.tier ? <TierBadge tier={worker.tier} /> : null}
                       <span className={`rounded-md px-2 py-1 text-[11px] ${worker.workerType === "entertainment" ? "bg-[#BF5AF2]/14 text-[#D9A0FF]" : "bg-[#007AFF]/10 text-[#8EC9FF]"}`}>
                         {worker.workerType === "entertainment" ? "娱乐陪玩" : "普通打手"}
                       </span>
@@ -880,7 +895,7 @@ function EditWorkerDialog({
   const updateWorker = useClubStore((state) => state.updateWorker);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [name, setName] = useState(worker?.name ?? "");
-  const [tier, setTier] = useState<WorkerTier>(worker?.tier ?? "1档");
+  const [tier, setTier] = useState<WorkerTier | null>(worker?.tier ?? null);
   const [workerType, setWorkerType] = useState<WorkerType>(worker?.workerType ?? "standard");
 
   if (!worker) return null;
@@ -907,26 +922,22 @@ function EditWorkerDialog({
           </DialogHeader>
           <label className="space-y-2">
             <span className="text-sm font-medium text-white/65">打手姓名</span>
-            <Input value={name} maxLength={32} onChange={(event) => setName(event.target.value)} className={inputClass} autoFocus />
-          </label>
-          <label className="space-y-2">
-            <span className="flex items-center justify-between text-sm font-medium text-white/65">
-              <span>档位</span>
-              {busy ? <span className="text-[#FF6961]">接单中已锁定</span> : null}
-            </span>
-            <Select value={tier} disabled={busy} onValueChange={(value) => setTier(value as WorkerTier)}>
-              <SelectTrigger className={`${inputClass} w-full disabled:cursor-not-allowed disabled:opacity-45`}><SelectValue /></SelectTrigger>
-              <SelectContent className="border-white/10 bg-[#242426] text-white">
-                {tiers.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
-              </SelectContent>
-            </Select>
+            <Input value={name} maxLength={20} onChange={(event) => setName(event.target.value)} className={inputClass} autoFocus />
           </label>
           <label className="space-y-2">
             <span className="flex items-center justify-between text-sm font-medium text-white/65">
               <span>打手类型</span>
               {busy ? <span className="text-[#FF6961]">接单中已锁定</span> : null}
             </span>
-            <Select value={workerType} disabled={busy} onValueChange={(value) => setWorkerType(value as WorkerType)}>
+            <Select
+              value={workerType}
+              disabled={busy}
+              onValueChange={(value) => {
+                const nextType = value as WorkerType;
+                setWorkerType(nextType);
+                setTier(nextType === "entertainment" ? null : "1档");
+              }}
+            >
               <SelectTrigger className={`${inputClass} w-full disabled:cursor-not-allowed disabled:opacity-45`}><SelectValue /></SelectTrigger>
               <SelectContent className="border-white/10 bg-[#242426] text-white">
                 <SelectItem value="standard">普通打手</SelectItem>
@@ -935,6 +946,39 @@ function EditWorkerDialog({
             </Select>
             {busy ? <p className="text-[13px] leading-5 text-white/40">该打手正在执行订单，本次只能修改姓名；档位和类型保持锁定。</p> : null}
           </label>
+          <AnimatePresence initial={false}>
+            {workerType === "standard" ? (
+              <motion.label
+                key="worker-tier"
+                initial={{ opacity: 0, height: 0, y: -8 }}
+                animate={{ opacity: 1, height: "auto", y: 0 }}
+                exit={{ opacity: 0, height: 0, y: -8 }}
+                transition={{ type: "spring", stiffness: 300, damping: 28 }}
+                className="space-y-2 overflow-hidden"
+              >
+                <span className="flex items-center justify-between text-sm font-medium text-white/65">
+                  <span>档位</span>
+                  {busy ? <span className="text-[#FF6961]">接单中已锁定</span> : null}
+                </span>
+                <Select value={tier ?? "1档"} disabled={busy} onValueChange={(value) => setTier(value as WorkerTier)}>
+                  <SelectTrigger className={`${inputClass} w-full disabled:cursor-not-allowed disabled:opacity-45`}><SelectValue /></SelectTrigger>
+                  <SelectContent className="border-white/10 bg-[#242426] text-white">
+                    {tiers.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </motion.label>
+            ) : (
+              <motion.p
+                key="entertainment-note"
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                className="rounded-xl border border-[#BF5AF2]/18 bg-[#BF5AF2]/[0.08] px-3 py-2 text-[13px] leading-5 text-[#D9A0FF]"
+              >
+                娱乐陪玩不设档位，仅参与统一抽成的单人或双人平分订单。
+              </motion.p>
+            )}
+          </AnimatePresence>
           <DialogFooter>
             <Button variant="ghost" className="h-11 rounded-xl text-white/60 hover:bg-white/[0.06] hover:text-white" onClick={() => onOpenChange(false)}>取消</Button>
             <Button className="h-11 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]" disabled={!name.trim() || isMutating} onClick={save}>{isMutating ? "正在保存…" : "保存修改"}</Button>

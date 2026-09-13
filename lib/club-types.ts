@@ -13,8 +13,9 @@ export type OrderType = "escort" | "companion";
 export interface Worker {
   id: string;
   name: string;
-  tier: WorkerTier;
-  /** 仅作运营标识，不参与档位匹配与财务计算。 */
+  /** 娱乐陪玩没有档位；普通打手必须保留 1档 / 2档 / 3档。 */
+  tier: WorkerTier | null;
+  /** 用于运营标识与派单边界；不直接改变既有财务公式。 */
   workerType: WorkerType;
   /** 打手看板的持久化排序权重。 */
   order: number;
@@ -25,6 +26,9 @@ export interface Worker {
 export interface Folder {
   id: string;
   name: string;
+  /** null 表示根级文件夹；旧数据缺失时按 null 兼容。 */
+  parentId: string | null;
+  /** 同一父文件夹下的持久化排序权重。 */
   order: number;
   createdAt: number;
 }
@@ -69,7 +73,8 @@ export interface PriceMenuItem {
 export interface PayoutWeight {
   workerId: string;
   workerName: string;
-  tier: WorkerTier;
+  /** 统一抽成下允许娱乐陪玩以 null 档位参与。 */
+  tier: WorkerTier | null;
   weight: number;
 }
 

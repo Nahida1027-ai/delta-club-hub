@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -37,7 +37,7 @@ export function AddWorkerModal({ open, onOpenChange }: AddWorkerModalProps) {
   const addWorker = useClubStore((state) => state.addWorker);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [name, setName] = useState("");
-  const [tier, setTier] = useState<WorkerTier>("1档");
+  const [tier, setTier] = useState<WorkerTier | null>("1档");
   const [workerType, setWorkerType] = useState<WorkerType>("standard");
   const [nameTouched, setNameTouched] = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -122,44 +122,72 @@ export function AddWorkerModal({ open, onOpenChange }: AddWorkerModalProps) {
             ) : null}
           </label>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <label id="add-worker-tier-label" className="text-sm font-medium text-white/65">
-                档位
-              </label>
-              <Select value={tier} onValueChange={(value) => setTier(value as WorkerTier)}>
-                <SelectTrigger
-                  aria-labelledby="add-worker-tier-label"
-                  className={`${inputClass} w-full`}
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className="border-white/10 bg-[#242426] text-white">
-                  {tiers.map((item) => (
-                    <SelectItem key={item} value={item}>{item}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <label id="add-worker-type-label" className="text-sm font-medium text-white/65">
-                打手类型
-              </label>
-              <Select value={workerType} onValueChange={(value) => setWorkerType(value as WorkerType)}>
-                <SelectTrigger
-                  aria-labelledby="add-worker-type-label"
-                  className={`${inputClass} w-full`}
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className="border-white/10 bg-[#242426] text-white">
-                  <SelectItem value="standard">普通打手</SelectItem>
-                  <SelectItem value="entertainment">娱乐陪玩</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+          <div className="space-y-2">
+            <label id="add-worker-type-label" className="text-sm font-medium text-white/65">
+              打手类型
+            </label>
+            <Select
+              value={workerType}
+              onValueChange={(value) => {
+                const nextType = value as WorkerType;
+                setWorkerType(nextType);
+                setTier(nextType === "entertainment" ? null : "1档");
+              }}
+            >
+              <SelectTrigger
+                aria-labelledby="add-worker-type-label"
+                className={`${inputClass} w-full`}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="border-white/10 bg-[#242426] text-white">
+                <SelectItem value="standard">普通打手</SelectItem>
+                <SelectItem value="entertainment">娱乐陪玩</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
+
+          <AnimatePresence initial={false}>
+            {workerType === "standard" ? (
+              <motion.div
+                key="worker-tier"
+                initial={{ opacity: 0, height: 0, y: -8 }}
+                animate={{ opacity: 1, height: "auto", y: 0 }}
+                exit={{ opacity: 0, height: 0, y: -8 }}
+                transition={{ type: "spring", stiffness: 300, damping: 28 }}
+                className="overflow-hidden"
+              >
+                <div className="space-y-2">
+                  <label id="add-worker-tier-label" className="text-sm font-medium text-white/65">
+                    档位
+                  </label>
+                  <Select value={tier ?? "1档"} onValueChange={(value) => setTier(value as WorkerTier)}>
+                    <SelectTrigger
+                      aria-labelledby="add-worker-tier-label"
+                      className={`${inputClass} w-full`}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="border-white/10 bg-[#242426] text-white">
+                      {tiers.map((item) => (
+                        <SelectItem key={item} value={item}>{item}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </motion.div>
+            ) : (
+              <motion.p
+                key="entertainment-note"
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                className="rounded-xl border border-[#BF5AF2]/18 bg-[#BF5AF2]/[0.08] px-3 py-2 text-[13px] leading-5 text-[#D9A0FF]"
+              >
+                娱乐陪玩不设档位，可参与统一抽成的单人或双人平分订单。
+              </motion.p>
+            )}
+          </AnimatePresence>
 
           <DialogFooter>
             <Button

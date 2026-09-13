@@ -43,6 +43,7 @@ import {
   toCents,
 } from "@/lib/settlement";
 import { useClubStore } from "@/store/use-club-store";
+import { isWorkerEligibleForMenuItem } from "@/lib/worker-eligibility";
 
 interface RequirementDraft {
   id: string;
@@ -125,7 +126,7 @@ export function OrderConfirmModal({
     () =>
       item
         ? workers.filter(
-            (worker) => worker.status === "idle" && item.eligible_tiers.includes(worker.tier),
+            (worker) => worker.status === "idle" && isWorkerEligibleForMenuItem(item, worker),
           )
         : [],
     [item, workers],
@@ -368,7 +369,9 @@ export function OrderConfirmModal({
                   !checked &&
                   (selectedIds.length >= needed ||
                     (item.split_type === "tiered" && sameTierSelected));
-                const tierRate = item.tier_commission_rates?.[worker.tier] ?? 0;
+                const tierRate = worker.tier
+                  ? item.tier_commission_rates?.[worker.tier] ?? 0
+                  : item.club_commission_rate;
                 return (
                   <label
                     key={worker.id}
@@ -392,16 +395,22 @@ export function OrderConfirmModal({
                           : `累计 ${worker.total_completed_orders} 单`}
                       </span>
                     </span>
-                    <span className={`rounded-lg border px-2 py-1 text-xs ${tierTone(worker.tier)}`}>
-                      {worker.tier}
-                    </span>
+                    {worker.workerType === "entertainment" || worker.tier === null ? (
+                      <span className="rounded-lg border border-[#BF5AF2]/25 bg-[#BF5AF2]/12 px-2 py-1 text-xs text-[#D9A0FF]">
+                        娱乐陪玩
+                      </span>
+                    ) : (
+                      <span className={`rounded-lg border px-2 py-1 text-xs ${tierTone(worker.tier)}`}>
+                        {worker.tier}
+                      </span>
+                    )}
                   </label>
                 );
               })}
             </div>
-            {!available.length ? (
+            {available.length < needed ? (
               <p className="mt-3 rounded-xl border border-[#FF453A]/20 bg-[#FF453A]/10 p-4 text-sm text-[#FF6961]">
-                没有符合档位规则的空闲打手。
+                可用打手不足，请调整服务配置或等待打手空闲。
               </p>
             ) : null}
           </section>

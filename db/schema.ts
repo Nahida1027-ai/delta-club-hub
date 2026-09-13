@@ -11,12 +11,17 @@ export const workers = sqliteTable("workers", {
   totalCompletedOrders: integer("total_completed_orders").notNull().default(0),
 });
 
-export const folders = sqliteTable("folders", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  sortOrder: integer("sort_order").notNull().default(0),
-  createdAt: integer("created_at").notNull(),
-});
+export const folders = sqliteTable(
+  "folders",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    parentId: text("parent_id"),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [index("idx_folders_parent_order").on(table.parentId, table.sortOrder)],
+);
 
 export const priceMenu = sqliteTable("price_menu", {
   id: text("id").primaryKey(),
