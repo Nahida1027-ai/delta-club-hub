@@ -4,6 +4,17 @@ export type WorkerStatus = "idle" | "busy";
 
 export type WorkerType = "standard" | "entertainment";
 
+export type SettlementStatus = "pending" | "paid";
+
+export interface WorkerSettlementConfig {
+  /** 按上海时区的日历天计算，最小 1 天。 */
+  interval_days: number;
+  /** 24 小时制 HH:mm。 */
+  settlement_time: string;
+  last_settled_at: number | null;
+  next_settlement_at: number | null;
+}
+
 export type SplitType = "single" | "equal" | "tiered";
 
 export type CommissionMode = "uniform" | "by_tier";
@@ -21,6 +32,9 @@ export interface Worker {
   order: number;
   status: WorkerStatus;
   total_completed_orders: number;
+  /** 首次工资周期的起点。 */
+  joined_at: number;
+  settlement_config: WorkerSettlementConfig;
 }
 
 export interface Folder {
@@ -128,6 +142,37 @@ export interface Order {
   created_at: string;
   completed_at: string | null;
   pricing_snapshot: OrderPricingSnapshot;
+  /** 所有参与打手都已归入工资结算记录后才为 true。 */
+  settled: boolean;
+  /** 向后兼容的最近一次结算记录 ID。 */
+  settlement_id: string | null;
+  /** 双人订单按打手独立结算，避免一人到期后提前锁住另一人的工资。 */
+  settlement_ids_by_worker: Record<string, string>;
+}
+
+export interface SettlementOrderSnapshot {
+  order_id: string;
+  service_name: string;
+  completed_at: string;
+  worker_amount: number;
+}
+
+export interface SettlementRecord {
+  id: string;
+  worker_id: string;
+  worker_name_snapshot: string;
+  worker_type_snapshot: WorkerType;
+  period_start: number;
+  period_end: number;
+  order_ids: string[];
+  /** 生成时冻结的明细；已发放后即使订单历史删除仍可审计。 */
+  order_details: SettlementOrderSnapshot[];
+  total_orders: number;
+  total_amount: number;
+  status: SettlementStatus;
+  paid_at: number | null;
+  note: string;
+  created_at: number;
 }
 
 export interface ClubData {
@@ -135,6 +180,7 @@ export interface ClubData {
   menu: PriceMenuItem[];
   folders: Folder[];
   orders: Order[];
+  settlementRecords: SettlementRecord[];
 }
 
 export interface SettlementResult {

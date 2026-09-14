@@ -7,13 +7,21 @@ import type {
   Order,
   OrderPricingSnapshot,
   PriceMenuItem,
+  SettlementRecord,
   SettlementResult,
   SpecialRequirement,
   TipsByWorker,
   Worker,
+  WorkerSettlementConfig,
   WorkerTier,
   WorkerType,
 } from "@/lib/club-types";
+import {
+  calculateNextSettlementTime,
+  defaultSettlementConfig,
+  normalizeSettlementIntervalDays,
+  normalizeSettlementTime,
+} from "@/lib/payroll-settlement";
 import {
   buildPayoutWeights,
   calculateOrderBasePrice,
@@ -42,6 +50,8 @@ interface ApiData extends ClubData {
   new_order_id?: string;
   new_worker_id?: string;
   settlement?: SettlementResult;
+  created_settlement_id?: string;
+  generated_settlement_count?: number;
 }
 
 interface ReassignmentResult {
@@ -57,12 +67,18 @@ interface ClubStore extends ClubData {
   is_loading: boolean;
   is_ready: boolean;
   is_mutating: boolean;
+  is_checking_settlements: boolean;
   error: string | null;
   last_synced_at: string | null;
   load: () => Promise<void>;
   addWorker: (data: { name: string; tier: WorkerTier | null; workerType?: WorkerType }) => Promise<Worker>;
   addMenuItem: (data: MenuItemInput) => Promise<PriceMenuItem>;
-  updateWorker: (id: string, data: { name: string; tier: WorkerTier | null; workerType: WorkerType }) => Promise<void>;
+  updateWorker: (id: string, data: {
+    name: string;
+    tier: WorkerTier | null;
+    workerType: WorkerType;
+    settlement_config?: Pick<WorkerSettlementConfig, "interval_days" | "settlement_time">;
+  }) => Promise<void>;
   deleteWorker: (id: string) => Promise<void>;
   deleteHistoricalOrder: (orderId: string) => Promise<void>;
   cancelAndReassign: (orderId: string, oldWorkerId: string) => Promise<ReassignmentResult>;
@@ -83,6 +99,14 @@ interface ClubStore extends ClubData {
     hours?: number,
   ) => Promise<string>;
   finishOrder: (orderId: string, tipsByWorker: TipsByWorker) => Promise<SettlementResult>;
+  generateSettlementForWorker: (workerId: string) => Promise<SettlementRecord | null>;
+  checkAndGenerateSettlements: () => Promise<number>;
+  markSettlementPaid: (settlementId: string, note?: string) => Promise<void>;
+  updateSettlementNote: (settlementId: string, note: string) => Promise<void>;
+  updateWorkerSettlementConfig: (
+    workerId: string,
+    config: Pick<WorkerSettlementConfig, "interval_days" | "settlement_time">,
+  ) => Promise<void>;
 }
 
 async function apiRequest(body?: Record<string, unknown>): Promise<ApiData> {
@@ -187,6 +211,12 @@ function validateFolderName(value: string) {
   return name;
 }
 
+function validateSettlementNote(value: string) {
+  const note = value.trim();
+  if (Array.from(note).length > 500) throw new Error("结算备注最多 500 个字符");
+  return note;
+}
+
 function validateExactOrder(newOrder: string[], expectedIds: string[], label: string) {
   const unique = new Set(newOrder);
   if (
@@ -204,6 +234,7 @@ function clubSnapshot(data: ClubData): ClubData {
     menu: data.menu,
     folders: data.folders,
     orders: data.orders,
+    settlementRecords: data.settlementRecords,
   };
 }
 
@@ -212,9 +243,11 @@ export const useClubStore = create<ClubStore>((set, get) => ({
   menu: [],
   folders: [],
   orders: [],
+  settlementRecords: [],
   is_loading: false,
   is_ready: false,
   is_mutating: false,
+  is_checking_settlements: false,
   error: null,
   last_synced_at: null,
 
@@ -228,6 +261,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         menu: data.menu,
         folders: data.folders,
         orders: data.orders,
+        settlementRecords: data.settlementRecords,
         is_loading: false,
         is_ready: true,
         last_synced_at: new Date().toISOString(),
@@ -257,6 +291,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       throw new Error("已存在同名打手，请使用其他姓名");
     }
 
+    const joinedAt = Date.now();
+    const settlementConfig = defaultSettlementConfig();
     const worker: Worker = {
       id: crypto.randomUUID(),
       name,
@@ -267,6 +303,14 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         : 0,
       status: "idle",
       total_completed_orders: 0,
+      joined_at: joinedAt,
+      settlement_config: {
+        ...settlementConfig,
+        next_settlement_at: calculateNextSettlementTime({
+          joined_at: joinedAt,
+          settlement_config: settlementConfig,
+        }),
+      },
     };
     const previous = clubSnapshot(state);
     set({
@@ -672,11 +716,39 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     ) {
       throw new Error("该打手正在接单，只能修改姓名");
     }
+    const settlementConfig = data.settlement_config
+      ? {
+          ...worker.settlement_config,
+          interval_days: normalizeSettlementIntervalDays(
+            data.settlement_config.interval_days,
+          ),
+          settlement_time: normalizeSettlementTime(
+            data.settlement_config.settlement_time,
+          ),
+        }
+      : worker.settlement_config;
+    const normalizedSettlementConfig = data.settlement_config
+      ? {
+          ...settlementConfig,
+          next_settlement_at: calculateNextSettlementTime({
+            joined_at: worker.joined_at,
+            settlement_config: settlementConfig,
+          }),
+        }
+      : settlementConfig;
 
     const previous = clubSnapshot(state);
     set({
       workers: state.workers.map((candidate) =>
-        candidate.id === id ? { ...candidate, name, tier, workerType } : candidate,
+        candidate.id === id
+          ? {
+              ...candidate,
+              name,
+              tier,
+              workerType,
+              settlement_config: normalizedSettlementConfig,
+            }
+          : candidate,
       ),
       is_mutating: true,
       error: null,
@@ -685,7 +757,19 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       const result = await apiRequest({
         action: "update_worker",
         worker_id: id,
-        data: { name, tier, workerType },
+        data: {
+          name,
+          tier,
+          workerType,
+          ...(data.settlement_config
+            ? {
+                settlement_config: {
+                  interval_days: normalizedSettlementConfig.interval_days,
+                  settlement_time: normalizedSettlementConfig.settlement_time,
+                },
+              }
+            : {}),
+        },
       });
       set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
     } catch (error) {
@@ -700,6 +784,13 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     const worker = state.workers.find((candidate) => candidate.id === id);
     if (!worker) throw new Error("未找到该打手");
     if (worker.status === "busy") throw new Error("该打手正在接单，无法删除");
+    if (
+      state.settlementRecords.some(
+        (record) => record.worker_id === id && record.status === "pending",
+      )
+    ) {
+      throw new Error("该打手有待发放结算，请先处理");
+    }
 
     const removedOrders = state.orders.filter((order) =>
       order.assigned_worker_ids.includes(id),
@@ -713,6 +804,24 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         removedOrders,
       ),
       orders: state.orders.filter((order) => !order.assigned_worker_ids.includes(id)),
+      settlementRecords: state.settlementRecords.map((record) => {
+        if (record.status !== "pending") return record;
+        const removedIds = new Set(removedOrders.map((order) => order.id));
+        if (!record.order_ids.some((orderId) => removedIds.has(orderId))) return record;
+        const order_details = record.order_details.filter(
+          (detail) => !removedIds.has(detail.order_id),
+        );
+        const order_ids = record.order_ids.filter((orderId) => !removedIds.has(orderId));
+        return {
+          ...record,
+          order_ids,
+          order_details,
+          total_orders: order_ids.length,
+          total_amount: fromCents(
+            order_details.reduce((sum, detail) => sum + toCents(detail.worker_amount), 0),
+          ),
+        };
+      }),
       is_mutating: true,
       error: null,
     });
@@ -739,6 +848,24 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     set({
       workers: decrementCompletionCounts(state.workers, [order]),
       orders: state.orders.filter((candidate) => candidate.id !== orderId),
+      settlementRecords: state.settlementRecords.map((record) => {
+        if (record.status !== "pending" || !record.order_ids.includes(orderId)) {
+          return record;
+        }
+        const order_ids = record.order_ids.filter((id) => id !== orderId);
+        const order_details = record.order_details.filter(
+          (detail) => detail.order_id !== orderId,
+        );
+        return {
+          ...record,
+          order_ids,
+          order_details,
+          total_orders: order_ids.length,
+          total_amount: fromCents(
+            order_details.reduce((sum, detail) => sum + toCents(detail.worker_amount), 0),
+          ),
+        };
+      }),
       is_mutating: true,
       error: null,
     });
@@ -774,6 +901,9 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       id: optimisticId,
       assigned_worker_ids: assignedWorkerIds,
       created_at: new Date().toISOString(),
+      settled: false,
+      settlement_id: null,
+      settlement_ids_by_worker: {},
       pricing_snapshot: {
         ...order.pricing_snapshot,
         payout_weights: order.pricing_snapshot.payout_weights.map((entry) =>
@@ -959,6 +1089,9 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       created_at: new Date().toISOString(),
       completed_at: null,
       pricing_snapshot: snapshot,
+      settled: false,
+      settlement_id: null,
+      settlement_ids_by_worker: {},
     };
     const previous = clubSnapshot(state);
     set({
@@ -1054,6 +1187,157 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       });
       set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
       return data.settlement ?? settlement;
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  generateSettlementForWorker: async (workerId) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    if (!state.workers.some((worker) => worker.id === workerId)) {
+      throw new Error("未找到该打手");
+    }
+    const previous = clubSnapshot(state);
+    set({ is_mutating: true, error: null });
+    try {
+      const data = await apiRequest({
+        action: "generate_settlement_for_worker",
+        worker_id: workerId,
+      });
+      set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
+      return data.created_settlement_id
+        ? data.settlementRecords.find(
+            (record) => record.id === data.created_settlement_id,
+          ) ?? null
+        : null;
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  checkAndGenerateSettlements: async () => {
+    const state = get();
+    if (!state.is_ready || state.is_checking_settlements || state.is_mutating) return 0;
+    set({ is_checking_settlements: true });
+    try {
+      const data = await apiRequest({ action: "check_and_generate_settlements" });
+      set({
+        ...data,
+        is_checking_settlements: false,
+        last_synced_at: new Date().toISOString(),
+      });
+      return data.generated_settlement_count ?? 0;
+    } catch (error) {
+      set({
+        is_checking_settlements: false,
+        error: error instanceof Error ? error.message : "自动结算检查失败",
+      });
+      throw error;
+    }
+  },
+
+  markSettlementPaid: async (settlementId, noteValue) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const record = state.settlementRecords.find((item) => item.id === settlementId);
+    if (!record) throw new Error("未找到该结算记录");
+    if (record.status !== "pending") throw new Error("该结算已发放，未重复处理");
+    const note = noteValue === undefined ? record.note : validateSettlementNote(noteValue);
+    const paidAt = Date.now();
+    const previous = clubSnapshot(state);
+    set({
+      settlementRecords: state.settlementRecords.map((item) =>
+        item.id === settlementId
+          ? { ...item, status: "paid", paid_at: paidAt, note }
+          : item,
+      ),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const data = await apiRequest({
+        action: "mark_settlement_paid",
+        settlement_id: settlementId,
+        note,
+      });
+      set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  updateSettlementNote: async (settlementId, noteValue) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    if (!state.settlementRecords.some((record) => record.id === settlementId)) {
+      throw new Error("未找到该结算记录");
+    }
+    const note = validateSettlementNote(noteValue);
+    const previous = clubSnapshot(state);
+    set({
+      settlementRecords: state.settlementRecords.map((record) =>
+        record.id === settlementId ? { ...record, note } : record,
+      ),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const data = await apiRequest({
+        action: "update_settlement_note",
+        settlement_id: settlementId,
+        note,
+      });
+      set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  updateWorkerSettlementConfig: async (workerId, value) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const worker = state.workers.find((item) => item.id === workerId);
+    if (!worker) throw new Error("未找到该打手");
+    const config = {
+      interval_days: normalizeSettlementIntervalDays(value.interval_days),
+      settlement_time: normalizeSettlementTime(value.settlement_time),
+    };
+    const settlementConfig = {
+      ...worker.settlement_config,
+      ...config,
+    };
+    const nextSettlementAt = calculateNextSettlementTime({
+      joined_at: worker.joined_at,
+      settlement_config: settlementConfig,
+    });
+    const previous = clubSnapshot(state);
+    set({
+      workers: state.workers.map((item) =>
+        item.id === workerId
+          ? {
+              ...item,
+              settlement_config: {
+                ...settlementConfig,
+                next_settlement_at: nextSettlementAt,
+              },
+            }
+          : item,
+      ),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const data = await apiRequest({
+        action: "update_worker_settlement_config",
+        worker_id: workerId,
+        config,
+      });
+      set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
     } catch (error) {
       set({ ...previous, is_mutating: false });
       throw error;

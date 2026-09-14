@@ -72,6 +72,13 @@ const entertainmentWorker: Worker = {
   order: 0,
   status: "idle",
   total_completed_orders: 0,
+  joined_at: 0,
+  settlement_config: {
+    interval_days: 3,
+    settlement_time: "20:00",
+    last_settled_at: null,
+    next_settlement_at: null,
+  },
 };
 const standardWorker: Worker = {
   ...entertainmentWorker,

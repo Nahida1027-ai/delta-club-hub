@@ -50,6 +50,13 @@
       "when": 1789261595521,
       "tag": "0006_nested_folders",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1789311986024,
+      "tag": "0007_hesitant_patch",
+      "breakpoints": true
     }
   ]
 }

@@ -7,6 +7,9 @@ import type {
   OrderPricingSnapshot,
   OrderType,
   PriceMenuItem,
+  SettlementOrderSnapshot,
+  SettlementRecord,
+  SettlementStatus,
   SpecialRequirement,
   SplitType,
   TierCommissionRates,
@@ -17,6 +20,14 @@ import type {
   WorkerTier,
   WorkerType,
 } from "@/lib/club-types";
+import {
+  calculateNextSettlementTime,
+  calculateWorkerEarningForOrder,
+  defaultSettlementConfig,
+  getOrdersInPeriod,
+  normalizeSettlementIntervalDays,
+  normalizeSettlementTime,
+} from "@/lib/payroll-settlement";
 import {
   buildPayoutWeights,
   calculateOrderBasePrice,
@@ -49,6 +60,11 @@ interface WorkerRow {
   sort_order: number;
   status: "idle" | "busy";
   total_completed_orders: number;
+  joined_at: number;
+  settlement_interval_days: number;
+  settlement_time: string;
+  last_settled_at: number | null;
+  next_settlement_at: number | null;
 }
 
 interface FolderRow {
@@ -96,7 +112,34 @@ interface OrderRow {
   pricing_snapshot_json: string;
   created_at: string;
   completed_at: string | null;
+  settled: number;
+  settlement_id: string | null;
+  settlement_ids_by_worker_json: string;
 }
+
+interface SettlementRecordRow {
+  id: string;
+  worker_id: string;
+  worker_name_snapshot: string;
+  worker_type_snapshot: string;
+  period_start: number;
+  period_end: number;
+  order_ids_json: string;
+  order_details_json: string;
+  total_orders: number;
+  total_amount_cents: number;
+  status: SettlementStatus;
+  paid_at: number | null;
+  note: string;
+  created_at: number;
+}
+
+const WORKER_SELECT =
+  "SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_time, last_settled_at, next_settlement_at FROM workers";
+const ORDER_SELECT =
+  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json FROM orders";
+const SETTLEMENT_RECORD_SELECT =
+  "SELECT id, worker_id, worker_name_snapshot, worker_type_snapshot, period_start, period_end, order_ids_json, order_details_json, total_orders, total_amount_cents, status, paid_at, note, created_at FROM settlement_records";
 
 function normalizeCommissionMode(value: unknown): CommissionMode {
   return value === "by_tier" ? "by_tier" : "uniform";
@@ -122,6 +165,7 @@ function normalizeSnapshotTier(value: unknown): WorkerTier | null {
 
 function workerFromRow(row: WorkerRow): Worker {
   const workerType = normalizeWorkerType(row.worker_type);
+  const defaults = defaultSettlementConfig();
   return {
     id: row.id,
     name: row.name,
@@ -130,6 +174,46 @@ function workerFromRow(row: WorkerRow): Worker {
     order: row.sort_order,
     status: row.status,
     total_completed_orders: row.total_completed_orders,
+    joined_at: row.joined_at,
+    settlement_config: {
+      interval_days: normalizeSettlementIntervalDays(
+        row.settlement_interval_days ?? defaults.interval_days,
+      ),
+      settlement_time: normalizeSettlementTime(
+        row.settlement_time ?? defaults.settlement_time,
+      ),
+      last_settled_at: row.last_settled_at ?? null,
+      next_settlement_at: row.next_settlement_at ?? null,
+    },
+  };
+}
+
+function parseSettlementIdsByWorker(value: string | null | undefined) {
+  const parsed = JSON.parse(value || "{}") as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  return Object.fromEntries(
+    Object.entries(parsed as Record<string, unknown>)
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+}
+
+function settlementRecordFromRow(row: SettlementRecordRow): SettlementRecord {
+  const status: SettlementStatus = row.status === "paid" ? "paid" : "pending";
+  return {
+    id: row.id,
+    worker_id: row.worker_id,
+    worker_name_snapshot: row.worker_name_snapshot,
+    worker_type_snapshot: normalizeWorkerType(row.worker_type_snapshot),
+    period_start: row.period_start,
+    period_end: row.period_end,
+    order_ids: JSON.parse(row.order_ids_json || "[]") as string[],
+    order_details: JSON.parse(row.order_details_json || "[]") as SettlementOrderSnapshot[],
+    total_orders: row.total_orders,
+    total_amount: fromCents(row.total_amount_cents),
+    status,
+    paid_at: row.paid_at ?? null,
+    note: row.note ?? "",
+    created_at: row.created_at,
   };
 }
 
@@ -248,6 +332,50 @@ function orderAmountsFromRow(row: OrderRow, snapshot: OrderPricingSnapshot) {
   };
 }
 
+function orderFromRow(row: OrderRow): Order {
+  const pricingSnapshot = parsePricingSnapshot(row.pricing_snapshot_json);
+  const amounts = orderAmountsFromRow(row, pricingSnapshot);
+  const assignedWorkerIds = JSON.parse(row.assigned_worker_ids_json) as string[];
+  const orderType = normalizeOrderType(row.order_type ?? pricingSnapshot.order_type);
+  const settlementIdsByWorker = parseSettlementIdsByWorker(
+    row.settlement_ids_by_worker_json,
+  );
+  return {
+    id: row.id,
+    menu_item_id: row.menu_item_id,
+    assigned_worker_ids: assignedWorkerIds,
+    order_type: orderType,
+    hours:
+      orderType === "companion"
+        ? normalizeCompanionHours(row.hours_half_units / 2)
+        : null,
+    hourly_rate_snapshot:
+      orderType === "companion"
+        ? fromCents(row.hourly_rate_snapshot_cents)
+        : null,
+    split_type: row.split_type ?? pricingSnapshot.split_type,
+    status: row.status,
+    tip: fromCents(row.tip_cents),
+    tips_by_worker: parseStoredTipsByWorker(row.tips_by_worker_json, pricingSnapshot),
+    final_club_income:
+      row.final_club_income_cents === null
+        ? null
+        : fromCents(row.final_club_income_cents),
+    final_worker_incomes: JSON.parse(row.final_worker_incomes_json) as WorkerIncome[],
+    special_requirements: parseStoredSpecialRequirements(row.special_requirements_json),
+    base_price_snapshot: fromCents(amounts.basePriceSnapshotCents),
+    special_total: fromCents(amounts.specialTotalCents),
+    total_price: fromCents(amounts.totalPriceCents),
+    order_original_total: fromCents(amounts.orderOriginalTotalCents),
+    pricing_snapshot: pricingSnapshot,
+    created_at: row.created_at,
+    completed_at: row.completed_at,
+    settled: Boolean(row.settled),
+    settlement_id: row.settlement_id ?? null,
+    settlement_ids_by_worker: settlementIdsByWorker,
+  };
+}
+
 function chinaMonthDate(day: number, hour = 12) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
@@ -336,13 +464,60 @@ async function ensureSeeded() {
   ]);
 }
 
+/** 给迁移前的打手补齐首次结算起点与下次结算时间。 */
+async function ensureWorkerSettlementSchedules(now = Date.now()) {
+  const db = getD1();
+  const result = await db
+    .prepare(`${WORKER_SELECT} WHERE joined_at <= 0 OR next_settlement_at IS NULL`)
+    .all<WorkerRow>();
+  if (!result.results.length) return;
+
+  const normalizedRows = await Promise.all(
+    result.results.map(async (row) => {
+      if (row.joined_at > 0) {
+        return { row, joinedAt: row.joined_at, hasLegacyOrders: false };
+      }
+      const earliest = await db
+        .prepare(
+          "SELECT MIN(completed_at) AS completed_at FROM orders WHERE status = 'completed' AND completed_at IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(assigned_worker_ids_json) AS assigned WHERE assigned.value = ?)",
+        )
+        .bind(row.id)
+        .first<{ completed_at: string | null }>();
+      const earliestTimestamp = earliest?.completed_at
+        ? Date.parse(earliest.completed_at)
+        : Number.NaN;
+      return {
+        row,
+        joinedAt: Number.isFinite(earliestTimestamp) ? earliestTimestamp : now,
+        hasLegacyOrders: Number.isFinite(earliestTimestamp),
+      };
+    }),
+  );
+
+  await db.batch(
+    normalizedRows.map(({ row, joinedAt, hasLegacyOrders }) => {
+      const worker = workerFromRow({ ...row, joined_at: joinedAt });
+      // 迁移前已有收入时先生成一张“历史待结”批次，避免旧订单因缺少真实加入时间而遗漏。
+      const nextSettlementAt = hasLegacyOrders
+        ? now
+        : calculateNextSettlementTime(worker, now);
+      return db
+        .prepare(
+          "UPDATE workers SET joined_at = ?, next_settlement_at = ? WHERE id = ? AND (joined_at <= 0 OR next_settlement_at IS NULL)",
+        )
+        .bind(joinedAt, nextSettlementAt, row.id);
+    }),
+  );
+}
+
 async function readClubData(): Promise<ClubData> {
   const db = getD1();
-  const [workerResult, menuResult, folderResult, orderResult] = await Promise.all([
-    db.prepare("SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders FROM workers ORDER BY sort_order, id").all<WorkerRow>(),
+  const [workerResult, menuResult, folderResult, orderResult, settlementResult] = await Promise.all([
+    db.prepare(`${WORKER_SELECT} ORDER BY sort_order, id`).all<WorkerRow>(),
     db.prepare("SELECT id, service_name, folder_id, sort_order, order_type, base_price_cents, hourly_rate_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu ORDER BY sort_order, id").all<MenuRow>(),
     db.prepare("SELECT id, name, parent_id, sort_order, created_at FROM folders ORDER BY parent_id, sort_order, created_at, id").all<FolderRow>(),
-    db.prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders ORDER BY created_at DESC").all<OrderRow>(),
+    db.prepare(`${ORDER_SELECT} ORDER BY created_at DESC`).all<OrderRow>(),
+    db.prepare(`${SETTLEMENT_RECORD_SELECT} ORDER BY period_end DESC, created_at DESC`).all<SettlementRecordRow>(),
   ]);
 
   const workers: Worker[] = workerResult.results.map(workerFromRow);
@@ -368,45 +543,191 @@ async function readClubData(): Promise<ClubData> {
     order: row.sort_order,
     createdAt: row.created_at,
   }));
-  const orders: Order[] = orderResult.results.map((row) => {
-    const pricingSnapshot = parsePricingSnapshot(row.pricing_snapshot_json);
-    const amounts = orderAmountsFromRow(row, pricingSnapshot);
-    const assignedWorkerIds = JSON.parse(row.assigned_worker_ids_json) as string[];
-    const orderType = normalizeOrderType(row.order_type ?? pricingSnapshot.order_type);
-    return {
-      id: row.id,
-      menu_item_id: row.menu_item_id,
-      assigned_worker_ids: assignedWorkerIds,
-      order_type: orderType,
-      hours: orderType === "companion"
-        ? normalizeCompanionHours(row.hours_half_units / 2)
-        : null,
-      hourly_rate_snapshot:
-        orderType === "companion"
-          ? fromCents(row.hourly_rate_snapshot_cents)
-          : null,
-      split_type: row.split_type ?? pricingSnapshot.split_type,
-      status: row.status,
-      tip: fromCents(row.tip_cents),
-      tips_by_worker: parseStoredTipsByWorker(
-        row.tips_by_worker_json,
-        pricingSnapshot,
-      ),
-      final_club_income:
-        row.final_club_income_cents === null ? null : fromCents(row.final_club_income_cents),
-      final_worker_incomes: JSON.parse(row.final_worker_incomes_json) as WorkerIncome[],
-      special_requirements: parseStoredSpecialRequirements(row.special_requirements_json),
-      base_price_snapshot: fromCents(amounts.basePriceSnapshotCents),
-      special_total: fromCents(amounts.specialTotalCents),
-      total_price: fromCents(amounts.totalPriceCents),
-      order_original_total: fromCents(amounts.orderOriginalTotalCents),
-      pricing_snapshot: pricingSnapshot,
-      created_at: row.created_at,
-      completed_at: row.completed_at,
-    };
-  });
+  const orders = orderResult.results.map(orderFromRow);
+  const settlementRecords = settlementResult.results.map(settlementRecordFromRow);
 
-  return { workers, menu, folders, orders };
+  return { workers, menu, folders, orders, settlementRecords };
+}
+
+function normalizeSettlementNote(value: unknown) {
+  const note = String(value ?? "").trim();
+  if (Array.from(note).length > 500) throw new Error("结算备注最多 500 个字符");
+  return note;
+}
+
+function workerSettlementConfigFromInput(
+  value: unknown,
+  fallback: Worker["settlement_config"],
+) {
+  const input = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+  return {
+    interval_days: normalizeSettlementIntervalDays(
+      input.interval_days ?? fallback.interval_days,
+    ),
+    settlement_time: normalizeSettlementTime(
+      input.settlement_time ?? fallback.settlement_time,
+    ),
+    last_settled_at: fallback.last_settled_at,
+    next_settlement_at: fallback.next_settlement_at,
+  };
+}
+
+function settlementJsonPath(workerId: string) {
+  return `$."${workerId.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+/**
+ * 为一名打手生成一个独立工资批次。订单金额与原财务流水完全不改动；
+ * 双人订单通过 settlement_ids_by_worker 分别记录两名打手的归批状态。
+ */
+async function generateSettlementForWorkerOnServer(
+  workerId: string,
+  now = Date.now(),
+  force = false,
+): Promise<SettlementRecord | null> {
+  const db = getD1();
+  const row = await db
+    .prepare(`${WORKER_SELECT} WHERE id = ?`)
+    .bind(workerId)
+    .first<WorkerRow>();
+  if (!row) throw new Error("未找到该打手");
+  const worker = workerFromRow(row);
+  const scheduledEnd = worker.settlement_config.next_settlement_at;
+  if (!scheduledEnd) throw new Error("打手结算时间尚未初始化");
+  if (!force && now < scheduledEnd) return null;
+
+  const periodStart = worker.settlement_config.last_settled_at ?? worker.joined_at;
+  const periodEnd = force && now < scheduledEnd ? now : scheduledEnd;
+  if (periodEnd <= periodStart) {
+    if (force) throw new Error("当前结算周期尚未开始");
+    return null;
+  }
+
+  const orderResult = await db
+    .prepare(
+      `${ORDER_SELECT} WHERE status = 'completed' AND completed_at >= ? AND completed_at <= ? ORDER BY completed_at, id`,
+    )
+    .bind(new Date(periodStart).toISOString(), new Date(periodEnd).toISOString())
+    .all<OrderRow>();
+  const periodOrders = getOrdersInPeriod(
+    orderResult.results.map(orderFromRow),
+    workerId,
+    periodStart,
+    periodEnd,
+  );
+  const orderDetails: SettlementOrderSnapshot[] = periodOrders.map((order) => ({
+    order_id: order.id,
+    service_name: order.pricing_snapshot.service_name,
+    completed_at: order.completed_at!,
+    worker_amount: calculateWorkerEarningForOrder(order, workerId),
+  }));
+  const totalAmountCents = orderDetails.reduce(
+    (sum, detail) => sum + toCents(detail.worker_amount),
+    0,
+  );
+  if (!Number.isSafeInteger(totalAmountCents)) throw new Error("工资结算金额超出安全范围");
+
+  const recordId = crypto.randomUUID();
+  const nextSettlementAt = calculateNextSettlementTime({
+    joined_at: worker.joined_at,
+    settlement_config: {
+      ...worker.settlement_config,
+      last_settled_at: periodEnd,
+      next_settlement_at: null,
+    },
+  });
+  const createdAt = now;
+  const orderIds = orderDetails.map((detail) => detail.order_id);
+  const path = settlementJsonPath(workerId);
+  const statements = [
+    db
+      .prepare(
+        "INSERT OR IGNORE INTO settlement_records (id, worker_id, worker_name_snapshot, worker_type_snapshot, period_start, period_end, order_ids_json, order_details_json, total_orders, total_amount_cents, status, paid_at, note, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, '', ? WHERE EXISTS (SELECT 1 FROM workers WHERE id = ? AND next_settlement_at = ?)",
+      )
+      .bind(
+        recordId,
+        worker.id,
+        worker.name,
+        worker.workerType,
+        periodStart,
+        periodEnd,
+        JSON.stringify(orderIds),
+        JSON.stringify(orderDetails),
+        orderIds.length,
+        totalAmountCents,
+        createdAt,
+        worker.id,
+        scheduledEnd,
+      ),
+  ];
+
+  for (const order of periodOrders) {
+    statements.push(
+      db
+        .prepare(
+          "UPDATE orders SET settlement_ids_by_worker_json = json_set(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?, ?), settlement_id = ?, settled = CASE WHEN json_array_length(assigned_worker_ids_json) <= (SELECT COUNT(*) FROM json_each(json_set(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?, ?))) THEN 1 ELSE 0 END WHERE id = ? AND status = 'completed' AND json_extract(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?) IS NULL AND EXISTS (SELECT 1 FROM settlement_records WHERE id = ?)",
+        )
+        .bind(path, recordId, recordId, path, recordId, order.id, path, recordId),
+    );
+  }
+  statements.push(
+    db
+      .prepare(
+        "UPDATE workers SET last_settled_at = ?, next_settlement_at = ? WHERE id = ? AND next_settlement_at = ? AND EXISTS (SELECT 1 FROM settlement_records WHERE id = ?)",
+      )
+      .bind(periodEnd, nextSettlementAt, worker.id, scheduledEnd, recordId),
+  );
+
+  const results = await db.batch(statements);
+  if (!results[0]?.meta.changes) {
+    const existing = await db
+      .prepare(`${SETTLEMENT_RECORD_SELECT} WHERE worker_id = ? AND period_end = ?`)
+      .bind(worker.id, periodEnd)
+      .first<SettlementRecordRow>();
+    return existing ? settlementRecordFromRow(existing) : null;
+  }
+
+  return {
+    id: recordId,
+    worker_id: worker.id,
+    worker_name_snapshot: worker.name,
+    worker_type_snapshot: worker.workerType,
+    period_start: periodStart,
+    period_end: periodEnd,
+    order_ids: orderIds,
+    order_details: orderDetails,
+    total_orders: orderIds.length,
+    total_amount: fromCents(totalAmountCents),
+    status: "pending",
+    paid_at: null,
+    note: "",
+    created_at: createdAt,
+  };
+}
+
+async function checkAndGenerateSettlementsOnServer(now = Date.now()) {
+  const db = getD1();
+  const workersDue = await db
+    .prepare(`${WORKER_SELECT} WHERE next_settlement_at IS NOT NULL AND next_settlement_at <= ?`)
+    .bind(now)
+    .all<WorkerRow>();
+  let generated = 0;
+  // 补齐应用离线期间错过的批次；上限防止异常配置造成无界循环。
+  for (const row of workersDue.results) {
+    for (let index = 0; index < 128; index += 1) {
+      const current = await db
+        .prepare(`${WORKER_SELECT} WHERE id = ?`)
+        .bind(row.id)
+        .first<WorkerRow>();
+      if (!current?.next_settlement_at || current.next_settlement_at > now) break;
+      const record = await generateSettlementForWorkerOnServer(row.id, now, false);
+      if (!record) break;
+      generated += 1;
+    }
+  }
+  return generated;
 }
 
 function jsonError(error: unknown, status = 400) {
@@ -421,6 +742,7 @@ function jsonError(error: unknown, status = 400) {
 export async function GET() {
   try {
     await ensureSeeded();
+    await ensureWorkerSettlementSchedules();
     return Response.json(await readClubData());
   } catch (error) {
     return jsonError(error, 500);
@@ -430,6 +752,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     await ensureSeeded();
+    await ensureWorkerSettlementSchedules();
     const payload = (await request.json()) as Record<string, unknown>;
     const action = payload.action;
     const db = getD1();
@@ -444,9 +767,26 @@ export async function POST(request: Request) {
       if (!name) throw new Error("请输入打手姓名");
       if (Array.from(name).length > 20) throw new Error("打手姓名最多 20 个字符");
 
+      const joinedAt = Date.now();
+      const settlementConfig = defaultSettlementConfig();
+      const nextSettlementAt = calculateNextSettlementTime({
+        joined_at: joinedAt,
+        settlement_config: settlementConfig,
+      });
+
       const result = await db
-        .prepare("INSERT INTO workers (id, name, tier, worker_type, sort_order, status, total_completed_orders) SELECT ?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM workers), 0), 'idle', 0 WHERE NOT EXISTS (SELECT 1 FROM workers WHERE name = ? COLLATE NOCASE)")
-        .bind(workerId, name, tier ?? "", workerType, name)
+        .prepare("INSERT INTO workers (id, name, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_time, last_settled_at, next_settlement_at) SELECT ?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM workers), 0), 'idle', 0, ?, ?, ?, NULL, ? WHERE NOT EXISTS (SELECT 1 FROM workers WHERE name = ? COLLATE NOCASE)")
+        .bind(
+          workerId,
+          name,
+          tier ?? "",
+          workerType,
+          joinedAt,
+          settlementConfig.interval_days,
+          settlementConfig.settlement_time,
+          nextSettlementAt,
+          name,
+        )
         .run();
       if (!result.meta.changes) {
         return Response.json(
@@ -461,6 +801,96 @@ export async function POST(request: Request) {
         ...data,
         created_worker: createdWorker,
       });
+    }
+
+    if (action === "check_and_generate_settlements") {
+      const generatedSettlementCount = await checkAndGenerateSettlementsOnServer();
+      return Response.json({
+        ...(await readClubData()),
+        generated_settlement_count: generatedSettlementCount,
+      });
+    }
+
+    if (action === "generate_settlement_for_worker") {
+      const workerId = String(payload.worker_id ?? "").trim();
+      const record = await generateSettlementForWorkerOnServer(
+        workerId,
+        Date.now(),
+        true,
+      );
+      return Response.json({
+        ...(await readClubData()),
+        created_settlement_id: record?.id,
+      });
+    }
+
+    if (action === "mark_settlement_paid") {
+      const settlementId = String(payload.settlement_id ?? "").trim();
+      if (!settlementId) throw new Error("结算记录 ID 无效");
+      const paidAt = Date.now();
+      const noteProvided = Object.prototype.hasOwnProperty.call(payload, "note");
+      const note = noteProvided ? normalizeSettlementNote(payload.note) : null;
+      const result = noteProvided
+        ? await db
+            .prepare(
+              "UPDATE settlement_records SET status = 'paid', paid_at = ?, note = ? WHERE id = ? AND status = 'pending'",
+            )
+            .bind(paidAt, note, settlementId)
+            .run()
+        : await db
+            .prepare(
+              "UPDATE settlement_records SET status = 'paid', paid_at = ? WHERE id = ? AND status = 'pending'",
+            )
+            .bind(paidAt, settlementId)
+            .run();
+      if (!result.meta.changes) {
+        return Response.json(
+          { error: "该结算已发放或记录不存在，未重复处理" },
+          { status: 409 },
+        );
+      }
+      return Response.json(await readClubData());
+    }
+
+    if (action === "update_settlement_note") {
+      const settlementId = String(payload.settlement_id ?? "").trim();
+      const note = normalizeSettlementNote(payload.note);
+      const result = await db
+        .prepare("UPDATE settlement_records SET note = ? WHERE id = ?")
+        .bind(note, settlementId)
+        .run();
+      if (!result.meta.changes) throw new Error("未找到该结算记录");
+      return Response.json(await readClubData());
+    }
+
+    if (action === "update_worker_settlement_config") {
+      const workerId = String(payload.worker_id ?? "").trim();
+      const row = await db
+        .prepare(`${WORKER_SELECT} WHERE id = ?`)
+        .bind(workerId)
+        .first<WorkerRow>();
+      if (!row) throw new Error("未找到该打手");
+      const worker = workerFromRow(row);
+      const config = workerSettlementConfigFromInput(
+        payload.config,
+        worker.settlement_config,
+      );
+      const nextSettlementAt = calculateNextSettlementTime({
+        joined_at: worker.joined_at,
+        settlement_config: { ...config, next_settlement_at: null },
+      });
+      await db
+        .prepare(
+          "UPDATE workers SET settlement_interval_days = ?, settlement_time = ?, next_settlement_at = ? WHERE id = ?",
+        )
+        .bind(
+          config.interval_days,
+          config.settlement_time,
+          nextSettlementAt,
+          workerId,
+        )
+        .run();
+      return Response.json(await readClubData());
     }
 
     if (action === "add_menu_item") {
@@ -828,7 +1258,7 @@ export async function POST(request: Request) {
       if (Array.from(name).length > 20) throw new Error("打手姓名最多 20 个字符");
 
       const existing = await db
-        .prepare("SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders FROM workers WHERE id = ?")
+        .prepare(`${WORKER_SELECT} WHERE id = ?`)
         .bind(workerId)
         .first<WorkerRow>();
       if (!existing) throw new Error("未找到该打手");
@@ -841,9 +1271,36 @@ export async function POST(request: Request) {
         return Response.json({ error: "该打手正在接单，只能修改姓名" }, { status: 409 });
       }
 
+      const existingWorker = workerFromRow(existing);
+      const config = Object.prototype.hasOwnProperty.call(data, "settlement_config")
+        ? workerSettlementConfigFromInput(
+            data.settlement_config,
+            existingWorker.settlement_config,
+          )
+        : existingWorker.settlement_config;
+      const nextSettlementAt = Object.prototype.hasOwnProperty.call(
+        data,
+        "settlement_config",
+      )
+        ? calculateNextSettlementTime({
+            joined_at: existingWorker.joined_at,
+            settlement_config: { ...config, next_settlement_at: null },
+          })
+        : existingWorker.settlement_config.next_settlement_at;
+
       const result = await db
-        .prepare("UPDATE workers SET name = ?, tier = ?, worker_type = ? WHERE id = ? AND (status = 'idle' OR (tier = ? AND worker_type = ?))")
-        .bind(name, tier ?? "", workerType, workerId, tier ?? "", workerType)
+        .prepare("UPDATE workers SET name = ?, tier = ?, worker_type = ?, settlement_interval_days = ?, settlement_time = ?, next_settlement_at = ? WHERE id = ? AND (status = 'idle' OR (tier = ? AND worker_type = ?))")
+        .bind(
+          name,
+          tier ?? "",
+          workerType,
+          config.interval_days,
+          config.settlement_time,
+          nextSettlementAt,
+          workerId,
+          tier ?? "",
+          workerType,
+        )
         .run();
       if (!result.meta.changes) {
         return Response.json({ error: "打手状态刚刚发生变化，请重试" }, { status: 409 });
@@ -854,20 +1311,62 @@ export async function POST(request: Request) {
     if (action === "delete_historical_order") {
       const orderId = String(payload.order_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare(`${ORDER_SELECT} WHERE id = ?`)
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "completed") {
         return Response.json({ error: "只允许删除已完成的历史订单" }, { status: 409 });
       }
 
-      // final_worker_incomes 已含每人的基础工资与个人打赏，整行删除后收入、
-      // 总支出、排行榜与俱乐部抽成都将由剩余订单重新汇总。
-      const [deleteResult] = await db.batch([
+      const settlementIds = [...new Set([
+        ...Object.values(parseSettlementIdsByWorker(row.settlement_ids_by_worker_json)),
+        ...(row.settlement_id ? [row.settlement_id] : []),
+      ])];
+      const pendingRecords = settlementIds.length
+        ? await db
+            .prepare(
+              `${SETTLEMENT_RECORD_SELECT} WHERE id IN (${settlementIds.map(() => "?").join(", ")}) AND status = 'pending'`,
+            )
+            .bind(...settlementIds)
+            .all<SettlementRecordRow>()
+        : { results: [] as SettlementRecordRow[] };
+      const order = orderFromRow(row);
+      const statements = pendingRecords.results.map((recordRow) => {
+        const record = settlementRecordFromRow(recordRow);
+        const remainingDetails = record.order_details.filter(
+          (detail) => detail.order_id !== orderId,
+        );
+        const remainingOrderIds = record.order_ids.filter((id) => id !== orderId);
+        const remainingAmountCents = remainingDetails.length
+          ? remainingDetails.reduce(
+              (sum, detail) => sum + toCents(detail.worker_amount),
+              0,
+            )
+          : Math.max(
+              0,
+              toCents(record.total_amount) -
+                toCents(calculateWorkerEarningForOrder(order, record.worker_id)),
+            );
+        return db
+          .prepare(
+            "UPDATE settlement_records SET order_ids_json = ?, order_details_json = ?, total_orders = ?, total_amount_cents = ? WHERE id = ? AND status = 'pending'",
+          )
+          .bind(
+            JSON.stringify(remainingOrderIds),
+            JSON.stringify(remainingDetails),
+            remainingOrderIds.length,
+            remainingAmountCents,
+            record.id,
+          );
+      });
+      // 待发放批次随订单回退；已发放批次保留生成时快照与金额，不做追溯扣减。
+      statements.push(
         db.prepare("DELETE FROM orders WHERE id = ? AND status = 'completed'").bind(orderId),
         db.prepare("UPDATE workers SET total_completed_orders = (SELECT COUNT(*) FROM orders AS completed_order WHERE completed_order.status = 'completed' AND EXISTS (SELECT 1 FROM json_each(completed_order.assigned_worker_ids_json) AS assigned WHERE assigned.value = workers.id))"),
-      ]);
-      if (!deleteResult.meta.changes) {
+      );
+      const results = await db.batch(statements);
+      const deleteResult = results.at(-2);
+      if (!deleteResult?.meta.changes) {
         return Response.json({ error: "订单状态刚刚发生变化，未执行删除" }, { status: 409 });
       }
       return Response.json(await readClubData());
@@ -876,16 +1375,28 @@ export async function POST(request: Request) {
     if (action === "delete_worker") {
       const workerId = String(payload.worker_id ?? "");
       const worker = await db
-        .prepare("SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders FROM workers WHERE id = ?")
+        .prepare(`${WORKER_SELECT} WHERE id = ?`)
         .bind(workerId)
         .first<WorkerRow>();
       if (!worker) throw new Error("未找到该打手");
       if (worker.status === "busy") {
         return Response.json({ error: "该打手正在接单，无法删除" }, { status: 409 });
       }
+      const pendingSettlement = await db
+        .prepare(
+          "SELECT id FROM settlement_records WHERE worker_id = ? AND status = 'pending' LIMIT 1",
+        )
+        .bind(workerId)
+        .first<{ id: string }>();
+      if (pendingSettlement) {
+        return Response.json(
+          { error: "该打手有待发放结算，请先处理" },
+          { status: 409 },
+        );
+      }
 
       const orderResult = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders")
+        .prepare(ORDER_SELECT)
         .all<OrderRow>();
       const relatedOrders = orderResult.results.filter((order) =>
         (JSON.parse(order.assigned_worker_ids_json) as string[]).includes(workerId),
@@ -894,7 +1405,38 @@ export async function POST(request: Request) {
         return Response.json({ error: "该打手正在接单，无法删除" }, { status: 409 });
       }
 
-      const statements = [];
+      const relatedOrderIds = new Set(relatedOrders.map((order) => order.id));
+      const pendingRelatedRecords = relatedOrders.length
+        ? await db
+            .prepare(`${SETTLEMENT_RECORD_SELECT} WHERE status = 'pending'`)
+            .all<SettlementRecordRow>()
+        : { results: [] as SettlementRecordRow[] };
+      const statements = pendingRelatedRecords.results
+        .map(settlementRecordFromRow)
+        .filter((record) => record.order_ids.some((id) => relatedOrderIds.has(id)))
+        .map((record) => {
+          const remainingOrderIds = record.order_ids.filter(
+            (id) => !relatedOrderIds.has(id),
+          );
+          const remainingDetails = record.order_details.filter(
+            (detail) => !relatedOrderIds.has(detail.order_id),
+          );
+          const remainingAmountCents = remainingDetails.reduce(
+            (sum, detail) => sum + toCents(detail.worker_amount),
+            0,
+          );
+          return db
+            .prepare(
+              "UPDATE settlement_records SET order_ids_json = ?, order_details_json = ?, total_orders = ?, total_amount_cents = ? WHERE id = ? AND status = 'pending'",
+            )
+            .bind(
+              JSON.stringify(remainingOrderIds),
+              JSON.stringify(remainingDetails),
+              remainingOrderIds.length,
+              remainingAmountCents,
+              record.id,
+            );
+        });
       if (relatedOrders.length) {
         // 删除关联订单会一并移除 final_worker_incomes、tips_by_worker_json 与
         // final_club_income；共享订单中其他打手的业绩随后也会按剩余订单重算。
@@ -922,7 +1464,7 @@ export async function POST(request: Request) {
       const orderId = String(payload.order_id ?? "");
       const oldWorkerId = String(payload.old_worker_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare(`${ORDER_SELECT} WHERE id = ?`)
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "active") {
@@ -947,7 +1489,7 @@ export async function POST(request: Request) {
           .bind(row.menu_item_id)
           .first<MenuRow>(),
         db
-          .prepare("SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders FROM workers ORDER BY sort_order, id")
+          .prepare(`${WORKER_SELECT} ORDER BY sort_order, id`)
           .all<WorkerRow>(),
       ]);
       if (!menuRow) throw new Error("服务项目不存在");
@@ -1172,7 +1714,7 @@ export async function POST(request: Request) {
 
       const placeholders = workerIds.map(() => "?").join(", ");
       const workerRows = await db
-        .prepare(`SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders FROM workers WHERE id IN (${placeholders})`)
+        .prepare(`${WORKER_SELECT} WHERE id IN (${placeholders})`)
         .bind(...workerIds)
         .all<WorkerRow>();
       const workersById = new Map(workerRows.results.map((worker) => [worker.id, worker]));
@@ -1274,7 +1816,7 @@ export async function POST(request: Request) {
     if (action === "finish_order") {
       const orderId = String(payload.order_id ?? "");
       const row = await db
-        .prepare("SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at FROM orders WHERE id = ?")
+        .prepare(`${ORDER_SELECT} WHERE id = ?`)
         .bind(orderId)
         .first<OrderRow>();
       if (!row || row.status !== "active") {
