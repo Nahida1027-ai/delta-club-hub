@@ -18,7 +18,7 @@ import type {
 const MAX_MONEY_CENTS = 100_000_000_00;
 
 export function defaultTierCommissionRates(): TierCommissionRates {
-  return { "1档": 0, "2档": 0, "3档": 0 };
+  return { "1档": 0, "2档": 0, "3档": 0, "娱乐陪玩": 0 };
 }
 
 export function toCents(value: number): number {
@@ -124,9 +124,9 @@ export function validateMenuRule(input: {
     }
   } else {
     const rates = input.tier_commission_rates ?? defaultTierCommissionRates();
-    (["1档", "2档", "3档"] as WorkerTier[]).forEach((tier) => {
-      if (!Number.isFinite(rates[tier]) || rates[tier] < 0) {
-        throw new Error(`${tier}抽成必须是非负数字`);
+    (["1档", "2档", "3档", "娱乐陪玩"] as const).forEach((key) => {
+      if (!Number.isFinite(rates[key]) || rates[key] < 0) {
+        throw new Error(`${key}抽成必须是非负数字`);
       }
     });
   }
@@ -152,13 +152,14 @@ export function getCommissionRate(
     club_commission_rate: number;
     tier_commission_rates?: TierCommissionRates;
   },
-  workerTier: WorkerTier | null,
+  worker: Pick<Worker, "workerType" | "tier">,
 ) {
   if ((input.commission_mode ?? "uniform") === "by_tier") {
-    if (workerTier === null) {
-      throw new Error("娱乐陪玩不能参与按档位抽成订单");
+    if (worker.workerType === "entertainment") {
+      return input.tier_commission_rates?.["娱乐陪玩"] ?? 0;
     }
-    return input.tier_commission_rates?.[workerTier] ?? 0;
+    if (worker.tier === null) throw new Error("普通打手缺少档位，无法计算抽成");
+    return input.tier_commission_rates?.[worker.tier] ?? 0;
   }
   return input.club_commission_rate;
 }
@@ -204,7 +205,7 @@ export function buildPayoutWeights(
   if (splitType === "single") {
     if (selectedWorkers.length !== 1) throw new Error("单人模式必须分配 1 名打手");
     const worker = selectedWorkers[0];
-    return [{ workerId: worker.id, workerName: worker.name, tier: worker.tier, weight: 100 }];
+    return [{ workerId: worker.id, workerName: worker.name, workerType: worker.workerType, tier: worker.tier, weight: 100 }];
   }
 
   if (selectedWorkers.length !== 2) throw new Error("双人模式必须分配 2 名打手");
@@ -212,6 +213,7 @@ export function buildPayoutWeights(
     return selectedWorkers.map((worker) => ({
       workerId: worker.id,
       workerName: worker.name,
+      workerType: worker.workerType,
       tier: worker.tier,
       weight: 50,
     }));
@@ -226,6 +228,7 @@ export function buildPayoutWeights(
   return [first, second].map((worker) => ({
     workerId: worker.id,
     workerName: worker.name,
+    workerType: worker.workerType,
     tier: worker.tier,
     weight: ratios[worker.tier as "1档" | "2档"],
   }));
@@ -386,7 +389,10 @@ export function calculateSettlement(
   );
   let clubIncomeCents = 0;
   const workerIncomes = snapshot.payout_weights.map((entry, index) => {
-    const rate = getCommissionRate(snapshot, entry.tier);
+    const rate = getCommissionRate(snapshot, {
+      workerType: entry.workerType ?? (entry.tier === null ? "entertainment" : "standard"),
+      tier: entry.tier,
+    });
     if (!Number.isFinite(rate) || rate < 0) {
       throw new Error("俱乐部抽成比例无效");
     }

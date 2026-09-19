@@ -1,5 +1,6 @@
 // Intentionally empty by default.
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
 
 export const workers = sqliteTable("workers", {
   id: text("id").primaryKey(),
@@ -11,6 +12,9 @@ export const workers = sqliteTable("workers", {
   totalCompletedOrders: integer("total_completed_orders").notNull().default(0),
   joinedAt: integer("joined_at").notNull().default(0),
   settlementIntervalDays: integer("settlement_interval_days").notNull().default(3),
+  settlementReminderHours: integer("settlement_reminder_hours").notNull().default(72),
+  activePeriodId: text("active_period_id"),
+  // 旧版自动结算字段仅为兼容已部署表结构保留，业务逻辑不再读写。
   settlementTime: text("settlement_time").notNull().default("20:00"),
   lastSettledAt: integer("last_settled_at"),
   nextSettlementAt: integer("next_settlement_at"),
@@ -74,6 +78,10 @@ export const orders = sqliteTable(
     settlementIdsByWorkerJson: text("settlement_ids_by_worker_json")
       .notNull()
       .default("{}"),
+    settlementPeriodId: text("settlement_period_id"),
+    settlementPeriodIdsByWorkerJson: text("settlement_period_ids_by_worker_json")
+      .notNull()
+      .default("{}"),
     createdAt: text("created_at").notNull(),
     completedAt: text("completed_at"),
   },
@@ -83,10 +91,29 @@ export const orders = sqliteTable(
   ],
 );
 
+export const settlementPeriods = sqliteTable(
+  "settlement_periods",
+  {
+    id: text("id").primaryKey(),
+    workerId: text("worker_id").notNull(),
+    startedAt: integer("started_at").notNull(),
+    endedAt: integer("ended_at"),
+    status: text("status").notNull().default("active"),
+    settlementRecordId: text("settlement_record_id"),
+  },
+  (table) => [
+    index("idx_settlement_periods_worker_status").on(table.workerId, table.status),
+    uniqueIndex("idx_settlement_periods_one_active_worker")
+      .on(table.workerId)
+      .where(sql`${table.status} = 'active'`),
+  ],
+);
+
 export const settlementRecords = sqliteTable(
   "settlement_records",
   {
     id: text("id").primaryKey(),
+    periodId: text("period_id").notNull().default(""),
     workerId: text("worker_id").notNull(),
     workerNameSnapshot: text("worker_name_snapshot").notNull(),
     workerTypeSnapshot: text("worker_type_snapshot").notNull().default("standard"),
@@ -104,7 +131,7 @@ export const settlementRecords = sqliteTable(
   (table) => [
     index("idx_settlement_records_status_end").on(table.status, table.periodEnd),
     index("idx_settlement_records_worker_status").on(table.workerId, table.status),
-    uniqueIndex("idx_settlement_records_worker_period").on(
+    index("idx_settlement_records_worker_period").on(
       table.workerId,
       table.periodEnd,
     ),

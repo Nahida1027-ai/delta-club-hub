@@ -36,6 +36,7 @@ type FieldName =
   | "tier1Commission"
   | "tier2Commission"
   | "tier3Commission"
+  | "entertainmentCommission"
   | "firstRatio"
   | "secondRatio";
 type FieldErrors = Partial<Record<FieldName, string>>;
@@ -58,6 +59,7 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
     "1档": "0",
     "2档": "0",
     "3档": "0",
+    "娱乐陪玩": "0",
   });
   const [splitType, setSplitType] = useState<SplitType>("single");
   const [firstRatio, setFirstRatio] = useState("50");
@@ -96,11 +98,14 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
         nextErrors.commission = "统一抽成必须在 0% 到 100% 之间";
       }
     } else {
-      (["1档", "2档", "3档"] as const).forEach((tier, index) => {
-        const field = `tier${index + 1}Commission` as
+      (["1档", "2档", "3档", "娱乐陪玩"] as const).forEach((tier, index) => {
+        const field = (tier === "娱乐陪玩"
+          ? "entertainmentCommission"
+          : `tier${index + 1}Commission`) as
           | "tier1Commission"
           | "tier2Commission"
-          | "tier3Commission";
+          | "tier3Commission"
+          | "entertainmentCommission";
         const value = tierCommissions[tier];
         const numericValue = Number(value);
         if (!value.trim()) {
@@ -153,6 +158,7 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
         "1档": Number(tierCommissions["1档"]),
         "2档": Number(tierCommissions["2档"]),
         "3档": Number(tierCommissions["3档"]),
+        "娱乐陪玩": Number(tierCommissions["娱乐陪玩"]),
       },
       split_type: splitType,
       tiered_ratios: splitType === "tiered"
@@ -320,6 +326,7 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
                     tier1Commission: undefined,
                     tier2Commission: undefined,
                     tier3Commission: undefined,
+                    entertainmentCommission: undefined,
                   }));
                   setSubmitError("");
                 }}
@@ -381,15 +388,18 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
                   transition={{ duration: 0.2, ease: "easeOut" }}
                   className="overflow-hidden sm:col-span-2"
                 >
-                  <div className="grid gap-4 rounded-2xl border border-[#007AFF]/20 bg-[#007AFF]/[0.07] p-4 sm:grid-cols-3">
-                    {(["1档", "2档", "3档"] as const).map((tier, index) => {
-                      const field = `tier${index + 1}Commission` as
+                  <div className="grid gap-4 rounded-2xl border border-[#007AFF]/20 bg-[#007AFF]/[0.07] p-4 sm:grid-cols-2">
+                    {(["1档", "2档", "3档", "娱乐陪玩"] as const).map((tier, index) => {
+                      const field = (tier === "娱乐陪玩"
+                        ? "entertainmentCommission"
+                        : `tier${index + 1}Commission`) as
                         | "tier1Commission"
                         | "tier2Commission"
-                        | "tier3Commission";
+                        | "tier3Commission"
+                        | "entertainmentCommission";
                       const id = `add-service-tier-${index + 1}-commission`;
                       return (
-                        <Field key={tier} id={id} label={`${tier}打手抽成（%）`} error={errors[field]} tone="blue">
+                        <Field key={tier} id={id} label={`${tier === "娱乐陪玩" ? "娱乐陪玩" : `${tier}打手`}抽成（%）`} error={errors[field]} tone="blue">
                           <Input
                             id={id}
                             type="number"
@@ -408,7 +418,7 @@ export function AddServiceModal({ open, onOpenChange }: AddServiceModalProps) {
                         </Field>
                       );
                     })}
-                    <p className="text-[13px] leading-5 text-[#8FD3FF] sm:col-span-3">双人订单先平分订单金额，再从每名打手自己的份额中按其档位比例抽成。</p>
+                    <p className="text-[13px] leading-5 text-[#8FD3FF] sm:col-span-2">双人订单先平分订单金额，再按每名打手对应档位或娱乐陪玩专属比例抽成。</p>
                   </div>
                 </motion.div>
               )}

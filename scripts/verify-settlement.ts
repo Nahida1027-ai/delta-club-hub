@@ -22,6 +22,7 @@ const zeroTierRates: TierCommissionRates = {
   "1档": 0,
   "2档": 0,
   "3档": 0,
+  "娱乐陪玩": 0,
 };
 
 interface SnapshotOptions {
@@ -58,6 +59,7 @@ const worker = (
 ): PayoutWeight => ({
   workerId: id,
   workerName: id,
+  workerType: "standard",
   tier,
   weight,
 });
@@ -108,7 +110,7 @@ const cases = [
     result: calculateSettlement(
       snapshot(100, 0, [worker("A", 100)], {
         commissionMode: "by_tier",
-        tierRates: { "1档": 10, "2档": 15, "3档": 20 },
+        tierRates: { "1档": 10, "2档": 15, "3档": 20, "娱乐陪玩": 0 },
       }),
       {},
       130,
@@ -120,7 +122,7 @@ const cases = [
     result: calculateSettlement(
       snapshot(100, 0, [worker("A", 50), worker("B", 50)], {
         commissionMode: "by_tier",
-        tierRates: { "1档": 10, "2档": 20, "3档": 0 },
+        tierRates: { "1档": 10, "2档": 20, "3档": 0, "娱乐陪玩": 0 },
       }),
       {},
       130,
@@ -132,7 +134,7 @@ const cases = [
     result: calculateSettlement(
       snapshot(100, 0, [worker("A", 60), worker("B", 40)], {
         commissionMode: "by_tier",
-        tierRates: { "1档": 10, "2档": 20, "3档": 0 },
+        tierRates: { "1档": 10, "2档": 20, "3档": 0, "娱乐陪玩": 0 },
         splitType: "tiered",
         tieredRatios: { "1档": 60, "2档": 40 },
       }),
@@ -150,7 +152,7 @@ const cases = [
         [worker("B", 50, "2档"), worker("C", 50, "2档")],
         {
           commissionMode: "by_tier",
-          tierRates: { "1档": 0, "2档": 15, "3档": 0 },
+          tierRates: { "1档": 0, "2档": 15, "3档": 0, "娱乐陪玩": 0 },
         },
       ),
       {},
@@ -162,7 +164,7 @@ const cases = [
     result: calculateSettlement(
       snapshot(100, 0, [worker("A", 50), worker("B", 50)], {
         commissionMode: "by_tier",
-        tierRates: { "1档": 40, "2档": 60, "3档": 0 },
+        tierRates: { "1档": 40, "2档": 60, "3档": 0, "娱乐陪玩": 0 },
       }),
       { A: 5, B: 5 },
     ),
@@ -173,7 +175,7 @@ const cases = [
     result: calculateSettlement(
       snapshot(168, 0, [worker("A", 50), worker("B", 50)], {
         commissionMode: "by_tier",
-        tierRates: { "1档": 25, "2档": 20, "3档": 15 },
+        tierRates: { "1档": 25, "2档": 20, "3档": 15, "娱乐陪玩": 0 },
       }),
       { A: 10, B: 0 },
     ),
@@ -185,7 +187,7 @@ const cases = [
       {
         ...snapshot(200, 0, [worker("A", 50), worker("B", 50)], {
           commissionMode: "by_tier",
-          tierRates: { "1档": 25, "2档": 20, "3档": 15 },
+          tierRates: { "1档": 25, "2档": 20, "3档": 15, "娱乐陪玩": 0 },
         }),
         order_type: "companion",
         hourly_rate: 100,
@@ -217,7 +219,7 @@ assert.throws(
     calculateSettlement(
       snapshot(100, 0, [worker("A", 50), worker("B", 50)], {
         commissionMode: "by_tier",
-        tierRates: { "1档": -1, "2档": 20, "3档": 0 },
+        tierRates: { "1档": -1, "2档": 20, "3档": 0, "娱乐陪玩": 0 },
       }),
       {},
     ),

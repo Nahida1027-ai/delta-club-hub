@@ -42,6 +42,7 @@ import { useClubStore } from "@/store/use-club-store";
 const inputClass =
   "h-11 rounded-xl border-white/10 bg-white/[0.055] text-[15px] text-white shadow-none placeholder:text-white/30 focus-visible:border-[#007AFF]/60 focus-visible:ring-[#007AFF]/20";
 const tiers: WorkerTier[] = ["1档", "2档", "3档"];
+const commissionKeys = ["1档", "2档", "3档", "娱乐陪玩"] as const;
 
 type FieldName =
   | "serviceName"
@@ -51,6 +52,7 @@ type FieldName =
   | "tier1Commission"
   | "tier2Commission"
   | "tier3Commission"
+  | "entertainmentCommission"
   | "firstRatio"
   | "secondRatio"
   | "eligibleTiers";
@@ -99,6 +101,7 @@ function EditServiceForm({
     "1档": String(item.tier_commission_rates?.["1档"] ?? 0),
     "2档": String(item.tier_commission_rates?.["2档"] ?? 0),
     "3档": String(item.tier_commission_rates?.["3档"] ?? 0),
+    "娱乐陪玩": String(item.tier_commission_rates?.["娱乐陪玩"] ?? 0),
   });
   const [splitType, setSplitType] = useState<SplitType>(item.split_type);
   const [firstRatio, setFirstRatio] = useState(
@@ -149,15 +152,18 @@ function EditServiceForm({
         nextErrors.commission = "统一抽成必须在 0% 到 100% 之间";
       }
     } else {
-      tiers.forEach((tier, index) => {
-        const field = `tier${index + 1}Commission` as
+      commissionKeys.forEach((key, index) => {
+        const field = (key === "娱乐陪玩"
+          ? "entertainmentCommission"
+          : `tier${index + 1}Commission`) as
           | "tier1Commission"
           | "tier2Commission"
-          | "tier3Commission";
-        const value = tierCommissions[tier];
+          | "tier3Commission"
+          | "entertainmentCommission";
+        const value = tierCommissions[key];
         const numericValue = Number(value);
         if (!value.trim()) {
-          nextErrors[field] = `请输入${tier}抽成`;
+          nextErrors[field] = `请输入${key}抽成`;
         } else if (!Number.isFinite(numericValue) || numericValue < 0) {
           nextErrors[field] = "抽成必须是非负数字";
         }
@@ -205,6 +211,7 @@ function EditServiceForm({
         "1档": Number(tierCommissions["1档"]),
         "2档": Number(tierCommissions["2档"]),
         "3档": Number(tierCommissions["3档"]),
+        "娱乐陪玩": Number(tierCommissions["娱乐陪玩"]),
       },
       split_type: splitType,
       tiered_ratios:
@@ -390,6 +397,7 @@ function EditServiceForm({
                     tier1Commission: undefined,
                     tier2Commission: undefined,
                     tier3Commission: undefined,
+                    entertainmentCommission: undefined,
                   }));
                   setSubmitError("");
                 }}
@@ -451,15 +459,18 @@ function EditServiceForm({
                   transition={{ duration: 0.2, ease: "easeOut" }}
                   className="overflow-hidden sm:col-span-2"
                 >
-                  <div className="grid gap-4 rounded-2xl border border-[#007AFF]/20 bg-[#007AFF]/[0.07] p-4 sm:grid-cols-3">
-                    {tiers.map((tier, index) => {
-                      const field = `tier${index + 1}Commission` as
+                  <div className="grid gap-4 rounded-2xl border border-[#007AFF]/20 bg-[#007AFF]/[0.07] p-4 sm:grid-cols-2">
+                    {commissionKeys.map((tier, index) => {
+                      const field = (tier === "娱乐陪玩"
+                        ? "entertainmentCommission"
+                        : `tier${index + 1}Commission`) as
                         | "tier1Commission"
                         | "tier2Commission"
-                        | "tier3Commission";
+                        | "tier3Commission"
+                        | "entertainmentCommission";
                       const id = `edit-service-tier-${index + 1}-commission`;
                       return (
-                        <Field key={tier} id={id} label={`${tier}打手抽成（%）`} error={errors[field]} tone="blue">
+                        <Field key={tier} id={id} label={`${tier === "娱乐陪玩" ? "娱乐陪玩" : `${tier}打手`}抽成（%）`} error={errors[field]} tone="blue">
                           <Input
                             id={id}
                             type="number"
@@ -478,7 +489,7 @@ function EditServiceForm({
                         </Field>
                       );
                     })}
-                    <p className="text-[13px] leading-5 text-[#8FD3FF] sm:col-span-3">双人订单先平分订单金额，再从每名打手自己的份额中按其档位比例抽成。</p>
+                    <p className="text-[13px] leading-5 text-[#8FD3FF] sm:col-span-2">双人订单先平分订单金额，再按每名打手对应档位或娱乐陪玩专属比例抽成。</p>
                   </div>
                 </motion.div>
               )}
@@ -656,10 +667,9 @@ function buildPreview(item: PriceMenuItem) {
       joined_at: 0,
       settlement_config: {
         interval_days: 3,
-        settlement_time: "20:00",
-        last_settled_at: null,
-        next_settlement_at: null,
+        reminder_hours: 72,
       },
+      active_period_id: null,
     };
     const demoWorkers: Worker[] = item.split_type === "single"
       ? [{ id: "demo-1", name: "示例打手", tier: item.eligible_tiers[0] ?? "1档", workerType: "standard", order: 0, status: "idle", total_completed_orders: 0, ...demoSettlement }]

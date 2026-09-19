@@ -7,6 +7,8 @@ import type {
   OrderPricingSnapshot,
   OrderType,
   PriceMenuItem,
+  SettlementPeriod,
+  SettlementPeriodStatus,
   SettlementOrderSnapshot,
   SettlementRecord,
   SettlementStatus,
@@ -21,12 +23,11 @@ import type {
   WorkerType,
 } from "@/lib/club-types";
 import {
-  calculateNextSettlementTime,
   calculateWorkerEarningForOrder,
   defaultSettlementConfig,
-  getOrdersInPeriod,
+  getOrdersForSettlementPeriod,
   normalizeSettlementIntervalDays,
-  normalizeSettlementTime,
+  normalizeSettlementReminderHours,
 } from "@/lib/payroll-settlement";
 import {
   buildPayoutWeights,
@@ -62,9 +63,8 @@ interface WorkerRow {
   total_completed_orders: number;
   joined_at: number;
   settlement_interval_days: number;
-  settlement_time: string;
-  last_settled_at: number | null;
-  next_settlement_at: number | null;
+  settlement_reminder_hours: number;
+  active_period_id: string | null;
 }
 
 interface FolderRow {
@@ -115,10 +115,22 @@ interface OrderRow {
   settled: number;
   settlement_id: string | null;
   settlement_ids_by_worker_json: string;
+  settlement_period_id: string | null;
+  settlement_period_ids_by_worker_json: string;
+}
+
+interface SettlementPeriodRow {
+  id: string;
+  worker_id: string;
+  started_at: number;
+  ended_at: number | null;
+  status: SettlementPeriodStatus;
+  settlement_record_id: string | null;
 }
 
 interface SettlementRecordRow {
   id: string;
+  period_id: string;
   worker_id: string;
   worker_name_snapshot: string;
   worker_type_snapshot: string;
@@ -135,11 +147,13 @@ interface SettlementRecordRow {
 }
 
 const WORKER_SELECT =
-  "SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_time, last_settled_at, next_settlement_at FROM workers";
+  "SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id FROM workers";
 const ORDER_SELECT =
-  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json FROM orders";
+  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
+const SETTLEMENT_PERIOD_SELECT =
+  "SELECT id, worker_id, started_at, ended_at, status, settlement_record_id FROM settlement_periods";
 const SETTLEMENT_RECORD_SELECT =
-  "SELECT id, worker_id, worker_name_snapshot, worker_type_snapshot, period_start, period_end, order_ids_json, order_details_json, total_orders, total_amount_cents, status, paid_at, note, created_at FROM settlement_records";
+  "SELECT id, period_id, worker_id, worker_name_snapshot, worker_type_snapshot, period_start, period_end, order_ids_json, order_details_json, total_orders, total_amount_cents, status, paid_at, note, created_at FROM settlement_records";
 
 function normalizeCommissionMode(value: unknown): CommissionMode {
   return value === "by_tier" ? "by_tier" : "uniform";
@@ -179,12 +193,11 @@ function workerFromRow(row: WorkerRow): Worker {
       interval_days: normalizeSettlementIntervalDays(
         row.settlement_interval_days ?? defaults.interval_days,
       ),
-      settlement_time: normalizeSettlementTime(
-        row.settlement_time ?? defaults.settlement_time,
+      reminder_hours: normalizeSettlementReminderHours(
+        row.settlement_reminder_hours ?? defaults.reminder_hours,
       ),
-      last_settled_at: row.last_settled_at ?? null,
-      next_settlement_at: row.next_settlement_at ?? null,
     },
+    active_period_id: row.active_period_id ?? null,
   };
 }
 
@@ -201,6 +214,7 @@ function settlementRecordFromRow(row: SettlementRecordRow): SettlementRecord {
   const status: SettlementStatus = row.status === "paid" ? "paid" : "pending";
   return {
     id: row.id,
+    period_id: row.period_id || `legacy:${row.id}`,
     worker_id: row.worker_id,
     worker_name_snapshot: row.worker_name_snapshot,
     worker_type_snapshot: normalizeWorkerType(row.worker_type_snapshot),
@@ -214,6 +228,17 @@ function settlementRecordFromRow(row: SettlementRecordRow): SettlementRecord {
     paid_at: row.paid_at ?? null,
     note: row.note ?? "",
     created_at: row.created_at,
+  };
+}
+
+function settlementPeriodFromRow(row: SettlementPeriodRow): SettlementPeriod {
+  return {
+    id: row.id,
+    worker_id: row.worker_id,
+    started_at: row.started_at,
+    ended_at: row.ended_at ?? null,
+    status: row.status === "settled" ? "settled" : "active",
+    settlement_record_id: row.settlement_record_id ?? null,
   };
 }
 
@@ -248,11 +273,12 @@ function normalizeTierCommissionRates(value: unknown): TierCommissionRates {
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("按档位抽成配置无效");
   }
-  const rates = parsed as Partial<Record<WorkerTier, unknown>>;
+  const rates = parsed as Partial<Record<WorkerTier | "娱乐陪玩", unknown>>;
   return {
     "1档": normalizeCommissionRate(rates["1档"], "1档抽成"),
     "2档": normalizeCommissionRate(rates["2档"], "2档抽成"),
     "3档": normalizeCommissionRate(rates["3档"], "3档抽成"),
+    "娱乐陪玩": normalizeCommissionRate(rates["娱乐陪玩"], "娱乐陪玩抽成"),
   };
 }
 
@@ -281,6 +307,10 @@ function normalizePricingSnapshot(value: unknown): OrderPricingSnapshot {
     payout_weights: snapshot.payout_weights.map((entry) => ({
       ...entry,
       tier: normalizeSnapshotTier(entry.tier),
+      workerType:
+        entry.workerType === "entertainment" || entry.tier === null
+          ? "entertainment"
+          : "standard",
     })),
   };
 }
@@ -373,6 +403,10 @@ function orderFromRow(row: OrderRow): Order {
     settled: Boolean(row.settled),
     settlement_id: row.settlement_id ?? null,
     settlement_ids_by_worker: settlementIdsByWorker,
+    settlement_period_id: row.settlement_period_id ?? null,
+    settlement_period_ids_by_worker: parseSettlementIdsByWorker(
+      row.settlement_period_ids_by_worker_json,
+    ),
   };
 }
 
@@ -408,6 +442,7 @@ function seedSnapshot(
     payout_weights: workers.map((worker) => ({
       workerId: worker.id,
       workerName: worker.name,
+      workerType: "standard",
       tier: worker.tier,
       weight: worker.weight,
     })),
@@ -464,59 +499,14 @@ async function ensureSeeded() {
   ]);
 }
 
-/** 给迁移前的打手补齐首次结算起点与下次结算时间。 */
-async function ensureWorkerSettlementSchedules(now = Date.now()) {
-  const db = getD1();
-  const result = await db
-    .prepare(`${WORKER_SELECT} WHERE joined_at <= 0 OR next_settlement_at IS NULL`)
-    .all<WorkerRow>();
-  if (!result.results.length) return;
-
-  const normalizedRows = await Promise.all(
-    result.results.map(async (row) => {
-      if (row.joined_at > 0) {
-        return { row, joinedAt: row.joined_at, hasLegacyOrders: false };
-      }
-      const earliest = await db
-        .prepare(
-          "SELECT MIN(completed_at) AS completed_at FROM orders WHERE status = 'completed' AND completed_at IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(assigned_worker_ids_json) AS assigned WHERE assigned.value = ?)",
-        )
-        .bind(row.id)
-        .first<{ completed_at: string | null }>();
-      const earliestTimestamp = earliest?.completed_at
-        ? Date.parse(earliest.completed_at)
-        : Number.NaN;
-      return {
-        row,
-        joinedAt: Number.isFinite(earliestTimestamp) ? earliestTimestamp : now,
-        hasLegacyOrders: Number.isFinite(earliestTimestamp),
-      };
-    }),
-  );
-
-  await db.batch(
-    normalizedRows.map(({ row, joinedAt, hasLegacyOrders }) => {
-      const worker = workerFromRow({ ...row, joined_at: joinedAt });
-      // 迁移前已有收入时先生成一张“历史待结”批次，避免旧订单因缺少真实加入时间而遗漏。
-      const nextSettlementAt = hasLegacyOrders
-        ? now
-        : calculateNextSettlementTime(worker, now);
-      return db
-        .prepare(
-          "UPDATE workers SET joined_at = ?, next_settlement_at = ? WHERE id = ? AND (joined_at <= 0 OR next_settlement_at IS NULL)",
-        )
-        .bind(joinedAt, nextSettlementAt, row.id);
-    }),
-  );
-}
-
 async function readClubData(): Promise<ClubData> {
   const db = getD1();
-  const [workerResult, menuResult, folderResult, orderResult, settlementResult] = await Promise.all([
+  const [workerResult, menuResult, folderResult, orderResult, periodResult, settlementResult] = await Promise.all([
     db.prepare(`${WORKER_SELECT} ORDER BY sort_order, id`).all<WorkerRow>(),
     db.prepare("SELECT id, service_name, folder_id, sort_order, order_type, base_price_cents, hourly_rate_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu ORDER BY sort_order, id").all<MenuRow>(),
     db.prepare("SELECT id, name, parent_id, sort_order, created_at FROM folders ORDER BY parent_id, sort_order, created_at, id").all<FolderRow>(),
     db.prepare(`${ORDER_SELECT} ORDER BY created_at DESC`).all<OrderRow>(),
+    db.prepare(`${SETTLEMENT_PERIOD_SELECT} ORDER BY started_at DESC, id`).all<SettlementPeriodRow>(),
     db.prepare(`${SETTLEMENT_RECORD_SELECT} ORDER BY period_end DESC, created_at DESC`).all<SettlementRecordRow>(),
   ]);
 
@@ -544,9 +534,10 @@ async function readClubData(): Promise<ClubData> {
     createdAt: row.created_at,
   }));
   const orders = orderResult.results.map(orderFromRow);
+  const settlementPeriods = periodResult.results.map(settlementPeriodFromRow);
   const settlementRecords = settlementResult.results.map(settlementRecordFromRow);
 
-  return { workers, menu, folders, orders, settlementRecords };
+  return { workers, menu, folders, orders, settlementPeriods, settlementRecords };
 }
 
 function normalizeSettlementNote(value: unknown) {
@@ -566,11 +557,9 @@ function workerSettlementConfigFromInput(
     interval_days: normalizeSettlementIntervalDays(
       input.interval_days ?? fallback.interval_days,
     ),
-    settlement_time: normalizeSettlementTime(
-      input.settlement_time ?? fallback.settlement_time,
+    reminder_hours: normalizeSettlementReminderHours(
+      input.reminder_hours ?? fallback.reminder_hours,
     ),
-    last_settled_at: fallback.last_settled_at,
-    next_settlement_at: fallback.next_settlement_at,
   };
 }
 
@@ -578,44 +567,100 @@ function settlementJsonPath(workerId: string) {
   return `$."${workerId.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
-/**
- * 为一名打手生成一个独立工资批次。订单金额与原财务流水完全不改动；
- * 双人订单通过 settlement_ids_by_worker 分别记录两名打手的归批状态。
- */
-async function generateSettlementForWorkerOnServer(
+async function ensureActivePeriodForWorkerOnServer(
   workerId: string,
-  now = Date.now(),
-  force = false,
-): Promise<SettlementRecord | null> {
+  startedAt = Date.now(),
+): Promise<{ period: SettlementPeriod; created: boolean }> {
   const db = getD1();
-  const row = await db
+  const worker = await db
+    .prepare("SELECT id, active_period_id FROM workers WHERE id = ?")
+    .bind(workerId)
+    .first<{ id: string; active_period_id: string | null }>();
+  if (!worker) throw new Error("未找到该打手");
+
+  if (worker.active_period_id) {
+    const active = await db
+      .prepare(`${SETTLEMENT_PERIOD_SELECT} WHERE id = ? AND worker_id = ? AND status = 'active'`)
+      .bind(worker.active_period_id, workerId)
+      .first<SettlementPeriodRow>();
+    if (active) return { period: settlementPeriodFromRow(active), created: false };
+  }
+
+  const existing = await db
+    .prepare(`${SETTLEMENT_PERIOD_SELECT} WHERE worker_id = ? AND status = 'active' ORDER BY started_at DESC, id LIMIT 1`)
+    .bind(workerId)
+    .first<SettlementPeriodRow>();
+  if (existing) {
+    await db
+      .prepare("UPDATE workers SET active_period_id = ? WHERE id = ?")
+      .bind(existing.id, workerId)
+      .run();
+    return { period: settlementPeriodFromRow(existing), created: false };
+  }
+
+  if (!Number.isFinite(startedAt) || startedAt < 0) {
+    throw new Error("结算周期开始时间无效");
+  }
+  const periodId = crypto.randomUUID();
+  const normalizedStartedAt = Math.trunc(startedAt);
+  await db.batch([
+    db
+      .prepare(
+        "INSERT OR IGNORE INTO settlement_periods (id, worker_id, started_at, ended_at, status, settlement_record_id) SELECT ?, ?, ?, NULL, 'active', NULL WHERE EXISTS (SELECT 1 FROM workers WHERE id = ?) AND NOT EXISTS (SELECT 1 FROM settlement_periods WHERE worker_id = ? AND status = 'active')",
+      )
+      .bind(periodId, workerId, normalizedStartedAt, workerId, workerId),
+    db
+      .prepare(
+        "UPDATE workers SET active_period_id = (SELECT id FROM settlement_periods WHERE worker_id = ? AND status = 'active' ORDER BY started_at DESC, id LIMIT 1) WHERE id = ?",
+      )
+      .bind(workerId, workerId),
+  ]);
+  const active = await db
+    .prepare(`${SETTLEMENT_PERIOD_SELECT} WHERE worker_id = ? AND status = 'active' ORDER BY started_at DESC, id LIMIT 1`)
+    .bind(workerId)
+    .first<SettlementPeriodRow>();
+  if (!active) throw new Error("结算周期创建失败，请重试");
+  return { period: settlementPeriodFromRow(active), created: active.id === periodId };
+}
+
+/**
+ * 管理员手动关闭当前周期。订单原始金额、打赏、俱乐部收入和经营报表均不改动；
+ * 此处只冻结该打手在 [started_at, ended_at] 内已经完成的最终收入。
+ */
+async function settleWorkerPeriodOnServer(
+  workerId: string,
+  endedAtValue: unknown,
+  now = Date.now(),
+): Promise<SettlementRecord> {
+  const db = getD1();
+  const workerRow = await db
     .prepare(`${WORKER_SELECT} WHERE id = ?`)
     .bind(workerId)
     .first<WorkerRow>();
-  if (!row) throw new Error("未找到该打手");
-  const worker = workerFromRow(row);
-  const scheduledEnd = worker.settlement_config.next_settlement_at;
-  if (!scheduledEnd) throw new Error("打手结算时间尚未初始化");
-  if (!force && now < scheduledEnd) return null;
-
-  const periodStart = worker.settlement_config.last_settled_at ?? worker.joined_at;
-  const periodEnd = force && now < scheduledEnd ? now : scheduledEnd;
-  if (periodEnd <= periodStart) {
-    if (force) throw new Error("当前结算周期尚未开始");
-    return null;
+  if (!workerRow) throw new Error("未找到该打手");
+  const worker = workerFromRow(workerRow);
+  if (!worker.active_period_id) throw new Error("该打手暂无进行中的结算周期");
+  const periodRow = await db
+    .prepare(`${SETTLEMENT_PERIOD_SELECT} WHERE id = ? AND worker_id = ? AND status = 'active'`)
+    .bind(worker.active_period_id, worker.id)
+    .first<SettlementPeriodRow>();
+  if (!periodRow) throw new Error("该打手暂无进行中的结算周期");
+  const period = settlementPeriodFromRow(periodRow);
+  const endedAt = Math.trunc(Number(endedAtValue));
+  if (!Number.isFinite(endedAt) || endedAt < period.started_at) {
+    throw new Error("结算结束时间不能早于周期开始时间");
+  }
+  if (endedAt > now) {
+    throw new Error("结算结束时间不能晚于当前时间");
   }
 
-  const orderResult = await db
-    .prepare(
-      `${ORDER_SELECT} WHERE status = 'completed' AND completed_at >= ? AND completed_at <= ? ORDER BY completed_at, id`,
-    )
-    .bind(new Date(periodStart).toISOString(), new Date(periodEnd).toISOString())
-    .all<OrderRow>();
-  const periodOrders = getOrdersInPeriod(
-    orderResult.results.map(orderFromRow),
-    workerId,
-    periodStart,
-    periodEnd,
+  const orderResult = await db.prepare(ORDER_SELECT).all<OrderRow>();
+  const allOrders = orderResult.results.map(orderFromRow);
+  const periodOrders = getOrdersForSettlementPeriod(
+    allOrders,
+    worker.id,
+    period,
+    endedAt,
   );
   const orderDetails: SettlementOrderSnapshot[] = periodOrders.map((order) => ({
     order_id: order.id,
@@ -630,37 +675,48 @@ async function generateSettlementForWorkerOnServer(
   if (!Number.isSafeInteger(totalAmountCents)) throw new Error("工资结算金额超出安全范围");
 
   const recordId = crypto.randomUUID();
-  const nextSettlementAt = calculateNextSettlementTime({
-    joined_at: worker.joined_at,
-    settlement_config: {
-      ...worker.settlement_config,
-      last_settled_at: periodEnd,
-      next_settlement_at: null,
-    },
-  });
+  const nextPeriodId = crypto.randomUUID();
   const createdAt = now;
   const orderIds = orderDetails.map((detail) => detail.order_id);
   const path = settlementJsonPath(workerId);
   const statements = [
     db
       .prepare(
-        "INSERT OR IGNORE INTO settlement_records (id, worker_id, worker_name_snapshot, worker_type_snapshot, period_start, period_end, order_ids_json, order_details_json, total_orders, total_amount_cents, status, paid_at, note, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, '', ? WHERE EXISTS (SELECT 1 FROM workers WHERE id = ? AND next_settlement_at = ?)",
+        "INSERT INTO settlement_records (id, period_id, worker_id, worker_name_snapshot, worker_type_snapshot, period_start, period_end, order_ids_json, order_details_json, total_orders, total_amount_cents, status, paid_at, note, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, '', ? WHERE EXISTS (SELECT 1 FROM settlement_periods WHERE id = ? AND worker_id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND active_period_id = ?)",
       )
       .bind(
         recordId,
+        period.id,
         worker.id,
         worker.name,
         worker.workerType,
-        periodStart,
-        periodEnd,
+        period.started_at,
+        endedAt,
         JSON.stringify(orderIds),
         JSON.stringify(orderDetails),
         orderIds.length,
         totalAmountCents,
         createdAt,
+        period.id,
         worker.id,
-        scheduledEnd,
+        worker.id,
+        period.id,
       ),
+    db
+      .prepare(
+        "UPDATE settlement_periods SET status = 'settled', ended_at = ?, settlement_record_id = ? WHERE id = ? AND worker_id = ? AND status = 'active' AND EXISTS (SELECT 1 FROM settlement_records WHERE id = ?)",
+      )
+      .bind(endedAt, recordId, period.id, worker.id, recordId),
+    db
+      .prepare(
+        "INSERT INTO settlement_periods (id, worker_id, started_at, ended_at, status, settlement_record_id) SELECT ?, ?, ?, NULL, 'active', NULL WHERE EXISTS (SELECT 1 FROM settlement_periods WHERE id = ? AND status = 'settled' AND settlement_record_id = ?)",
+      )
+      .bind(nextPeriodId, worker.id, endedAt, period.id, recordId),
+    db
+      .prepare(
+        "UPDATE workers SET active_period_id = ? WHERE id = ? AND active_period_id = ? AND EXISTS (SELECT 1 FROM settlement_periods WHERE id = ? AND status = 'active')",
+      )
+      .bind(nextPeriodId, worker.id, period.id, nextPeriodId),
   ];
 
   for (const order of periodOrders) {
@@ -668,34 +724,49 @@ async function generateSettlementForWorkerOnServer(
       db
         .prepare(
           "UPDATE orders SET settlement_ids_by_worker_json = json_set(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?, ?), settlement_id = ?, settled = CASE WHEN json_array_length(assigned_worker_ids_json) <= (SELECT COUNT(*) FROM json_each(json_set(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?, ?))) THEN 1 ELSE 0 END WHERE id = ? AND status = 'completed' AND json_extract(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?) IS NULL AND EXISTS (SELECT 1 FROM settlement_records WHERE id = ?)",
-        )
-        .bind(path, recordId, recordId, path, recordId, order.id, path, recordId),
+      )
+      .bind(path, recordId, recordId, path, recordId, order.id, path, recordId),
     );
   }
+
+  // 在同一事务末尾把旧周期中尚未被本次结算锁定的订单统一移入新周期。
+  // 该集合同时覆盖 ended_at 之后完成的订单、仍在执行的订单，以及读取预览后
+  // 才并发创建的订单，避免它们遗留在已经关闭的周期中。
   statements.push(
     db
       .prepare(
-        "UPDATE workers SET last_settled_at = ?, next_settlement_at = ? WHERE id = ? AND next_settlement_at = ? AND EXISTS (SELECT 1 FROM settlement_records WHERE id = ?)",
+        "UPDATE orders SET settlement_period_ids_by_worker_json = json_set(COALESCE(NULLIF(settlement_period_ids_by_worker_json, ''), '{}'), ?, ?), settlement_period_id = CASE WHEN settlement_period_id = ? THEN ? ELSE settlement_period_id END WHERE json_extract(COALESCE(NULLIF(settlement_period_ids_by_worker_json, ''), '{}'), ?) = ? AND json_extract(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?) IS NULL AND EXISTS (SELECT 1 FROM settlement_periods WHERE id = ? AND status = 'active')",
       )
-      .bind(periodEnd, nextSettlementAt, worker.id, scheduledEnd, recordId),
+      .bind(
+        path,
+        nextPeriodId,
+        period.id,
+        nextPeriodId,
+        path,
+        period.id,
+        path,
+        nextPeriodId,
+      ),
   );
 
   const results = await db.batch(statements);
-  if (!results[0]?.meta.changes) {
-    const existing = await db
-      .prepare(`${SETTLEMENT_RECORD_SELECT} WHERE worker_id = ? AND period_end = ?`)
-      .bind(worker.id, periodEnd)
-      .first<SettlementRecordRow>();
-    return existing ? settlementRecordFromRow(existing) : null;
+  if (
+    !results[0]?.meta.changes ||
+    !results[1]?.meta.changes ||
+    !results[2]?.meta.changes ||
+    !results[3]?.meta.changes
+  ) {
+    throw new Error("结算周期状态刚刚发生变化，请刷新后重试");
   }
 
   return {
     id: recordId,
+    period_id: period.id,
     worker_id: worker.id,
     worker_name_snapshot: worker.name,
     worker_type_snapshot: worker.workerType,
-    period_start: periodStart,
-    period_end: periodEnd,
+    period_start: period.started_at,
+    period_end: endedAt,
     order_ids: orderIds,
     order_details: orderDetails,
     total_orders: orderIds.length,
@@ -707,27 +778,155 @@ async function generateSettlementForWorkerOnServer(
   };
 }
 
-async function checkAndGenerateSettlementsOnServer(now = Date.now()) {
+async function deleteSettlementRecordOnServer(settlementId: string) {
   const db = getD1();
-  const workersDue = await db
-    .prepare(`${WORKER_SELECT} WHERE next_settlement_at IS NOT NULL AND next_settlement_at <= ?`)
-    .bind(now)
-    .all<WorkerRow>();
-  let generated = 0;
-  // 补齐应用离线期间错过的批次；上限防止异常配置造成无界循环。
-  for (const row of workersDue.results) {
-    for (let index = 0; index < 128; index += 1) {
-      const current = await db
-        .prepare(`${WORKER_SELECT} WHERE id = ?`)
-        .bind(row.id)
-        .first<WorkerRow>();
-      if (!current?.next_settlement_at || current.next_settlement_at > now) break;
-      const record = await generateSettlementForWorkerOnServer(row.id, now, false);
-      if (!record) break;
-      generated += 1;
+  const recordRow = await db
+    .prepare(`${SETTLEMENT_RECORD_SELECT} WHERE id = ?`)
+    .bind(settlementId)
+    .first<SettlementRecordRow>();
+  if (!recordRow) throw new Error("未找到该结算记录");
+  const record = settlementRecordFromRow(recordRow);
+
+  const orderResult = record.order_ids.length
+    ? await db
+        .prepare(`${ORDER_SELECT} WHERE id IN (${record.order_ids.map(() => "?").join(", ")})`)
+        .bind(...record.order_ids)
+        .all<OrderRow>()
+    : { results: [] as OrderRow[] };
+  const affectedOrders = orderResult.results
+    .map(orderFromRow)
+    .filter(
+      (order) =>
+        order.settlement_ids_by_worker?.[record.worker_id] === record.id ||
+        (order.settlement_id === record.id && order.assigned_worker_ids.includes(record.worker_id)),
+    );
+
+  const workerExists = await db
+    .prepare("SELECT id FROM workers WHERE id = ?")
+    .bind(record.worker_id)
+    .first<{ id: string }>();
+  let activePeriod: SettlementPeriod | null = null;
+  let activePeriodStartChanged = false;
+  if (workerExists && affectedOrders.length) {
+    const earliestCompletedAt = affectedOrders.reduce((earliest, order) => {
+      const completedAt = order.completed_at ? Date.parse(order.completed_at) : Number.NaN;
+      return Number.isFinite(completedAt) ? Math.min(earliest, completedAt) : earliest;
+    }, Number.POSITIVE_INFINITY);
+    activePeriod = (
+      await ensureActivePeriodForWorkerOnServer(
+        record.worker_id,
+        Number.isFinite(earliestCompletedAt) ? earliestCompletedAt : record.period_start,
+      )
+    ).period;
+    // 删除旧结算后，历史订单必须重新进入现有活跃周期。若这些订单早于当前
+    // 周期起点，则把起点安全地向前扩展，否则下一次按 [start, end] 筛选会漏单。
+    if (
+      Number.isFinite(earliestCompletedAt) &&
+      earliestCompletedAt < activePeriod.started_at
+    ) {
+      activePeriod = { ...activePeriod, started_at: earliestCompletedAt };
+      activePeriodStartChanged = true;
     }
   }
-  return generated;
+
+  const statements = [];
+  if (activePeriod && activePeriodStartChanged) {
+    statements.push(
+      db
+        .prepare(
+          "UPDATE settlement_periods SET started_at = ? WHERE id = ? AND worker_id = ? AND status = 'active'",
+        )
+        .bind(activePeriod.started_at, activePeriod.id, record.worker_id),
+    );
+  }
+  statements.push(...affectedOrders.map((order) => {
+    const nextSettlementIds = { ...order.settlement_ids_by_worker };
+    delete nextSettlementIds[record.worker_id];
+    const nextPeriodIds = { ...order.settlement_period_ids_by_worker };
+    if (activePeriod) nextPeriodIds[record.worker_id] = activePeriod.id;
+    const fullySettled = order.assigned_worker_ids.every(
+      (workerId) => Boolean(nextSettlementIds[workerId]),
+    );
+    const remainingSettlementId = Object.values(nextSettlementIds).at(-1) ?? null;
+    return db
+      .prepare(
+        "UPDATE orders SET settled = ?, settlement_id = ?, settlement_ids_by_worker_json = ?, settlement_period_id = ?, settlement_period_ids_by_worker_json = ? WHERE id = ?",
+      )
+      .bind(
+        fullySettled ? 1 : 0,
+        remainingSettlementId,
+        JSON.stringify(nextSettlementIds),
+        activePeriod?.id ?? order.settlement_period_id,
+        JSON.stringify(nextPeriodIds),
+        order.id,
+      );
+  }));
+  statements.push(
+    db
+      .prepare("DELETE FROM settlement_periods WHERE id = ? AND settlement_record_id = ? AND status = 'settled'")
+      .bind(record.period_id, record.id),
+    db.prepare("DELETE FROM settlement_records WHERE id = ?").bind(record.id),
+  );
+  const results = await db.batch(statements);
+  if (!results.at(-1)?.meta.changes) {
+    throw new Error("结算记录状态刚刚发生变化，请刷新后重试");
+  }
+  return affectedOrders.length;
+}
+
+async function cleanupUnusedPeriod(period: SettlementPeriod | null) {
+  if (!period) return;
+  const db = getD1();
+  const usage = await db
+    .prepare(
+      "SELECT id FROM orders WHERE EXISTS (SELECT 1 FROM json_each(settlement_period_ids_by_worker_json) AS period_map WHERE period_map.value = ?) LIMIT 1",
+    )
+    .bind(period.id)
+    .first<{ id: string }>();
+  if (!usage) {
+    await db.batch([
+      db
+        .prepare("UPDATE workers SET active_period_id = NULL WHERE id = ? AND active_period_id = ?")
+        .bind(period.worker_id, period.id),
+      db
+        .prepare("DELETE FROM settlement_periods WHERE id = ? AND status = 'active' AND settlement_record_id IS NULL")
+        .bind(period.id),
+    ]);
+  }
+}
+
+async function ensureOrderPeriodsForWorkers(
+  workerIds: string[],
+  startedAt: number,
+) {
+  const periods = new Map<string, SettlementPeriod>();
+  const created: SettlementPeriod[] = [];
+  for (const workerId of workerIds) {
+    const result = await ensureActivePeriodForWorkerOnServer(workerId, startedAt);
+    periods.set(workerId, result.period);
+    if (result.created) created.push(result.period);
+  }
+  return { periods, created };
+}
+
+async function cleanupUnusedPeriods(periods: SettlementPeriod[]) {
+  for (const period of periods) {
+    await cleanupUnusedPeriod(period);
+  }
+}
+
+function periodMapFrom(periods: Map<string, SettlementPeriod>) {
+  return Object.fromEntries(
+    [...periods.entries()].map(([workerId, period]) => [workerId, period.id]),
+  );
+}
+
+function normalizeSettlementEndedAt(value: unknown) {
+  const endedAt = Math.trunc(Number(value));
+  if (!Number.isFinite(endedAt) || endedAt < 0) {
+    throw new Error("结算结束时间无效");
+  }
+  return endedAt;
 }
 
 function jsonError(error: unknown, status = 400) {
@@ -742,7 +941,6 @@ function jsonError(error: unknown, status = 400) {
 export async function GET() {
   try {
     await ensureSeeded();
-    await ensureWorkerSettlementSchedules();
     return Response.json(await readClubData());
   } catch (error) {
     return jsonError(error, 500);
@@ -752,7 +950,6 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     await ensureSeeded();
-    await ensureWorkerSettlementSchedules();
     const payload = (await request.json()) as Record<string, unknown>;
     const action = payload.action;
     const db = getD1();
@@ -769,13 +966,9 @@ export async function POST(request: Request) {
 
       const joinedAt = Date.now();
       const settlementConfig = defaultSettlementConfig();
-      const nextSettlementAt = calculateNextSettlementTime({
-        joined_at: joinedAt,
-        settlement_config: settlementConfig,
-      });
 
       const result = await db
-        .prepare("INSERT INTO workers (id, name, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_time, last_settled_at, next_settlement_at) SELECT ?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM workers), 0), 'idle', 0, ?, ?, ?, NULL, ? WHERE NOT EXISTS (SELECT 1 FROM workers WHERE name = ? COLLATE NOCASE)")
+        .prepare("INSERT INTO workers (id, name, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id) SELECT ?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM workers), 0), 'idle', 0, ?, ?, ?, NULL WHERE NOT EXISTS (SELECT 1 FROM workers WHERE name = ? COLLATE NOCASE)")
         .bind(
           workerId,
           name,
@@ -783,8 +976,7 @@ export async function POST(request: Request) {
           workerType,
           joinedAt,
           settlementConfig.interval_days,
-          settlementConfig.settlement_time,
-          nextSettlementAt,
+          settlementConfig.reminder_hours,
           name,
         )
         .run();
@@ -803,25 +995,35 @@ export async function POST(request: Request) {
       });
     }
 
-    if (action === "check_and_generate_settlements") {
-      const generatedSettlementCount = await checkAndGenerateSettlementsOnServer();
+    if (action === "ensure_active_period_for_worker") {
+      const workerId = String(payload.worker_id ?? "").trim();
+      const startedAt = payload.started_at === undefined
+        ? Date.now()
+        : normalizeSettlementEndedAt(payload.started_at);
+      const result = await ensureActivePeriodForWorkerOnServer(workerId, startedAt);
       return Response.json({
         ...(await readClubData()),
-        generated_settlement_count: generatedSettlementCount,
+        created_period_id: result.period.id,
       });
     }
 
-    if (action === "generate_settlement_for_worker") {
+    if (action === "settle_worker_period") {
       const workerId = String(payload.worker_id ?? "").trim();
-      const record = await generateSettlementForWorkerOnServer(
+      const record = await settleWorkerPeriodOnServer(
         workerId,
-        Date.now(),
-        true,
+        normalizeSettlementEndedAt(payload.ended_at),
       );
       return Response.json({
         ...(await readClubData()),
         created_settlement_id: record?.id,
       });
+    }
+
+    if (action === "delete_settlement_record") {
+      const settlementId = String(payload.settlement_id ?? "").trim();
+      if (!settlementId) throw new Error("结算记录 ID 无效");
+      await deleteSettlementRecordOnServer(settlementId);
+      return Response.json(await readClubData());
     }
 
     if (action === "mark_settlement_paid") {
@@ -875,18 +1077,13 @@ export async function POST(request: Request) {
         payload.config,
         worker.settlement_config,
       );
-      const nextSettlementAt = calculateNextSettlementTime({
-        joined_at: worker.joined_at,
-        settlement_config: { ...config, next_settlement_at: null },
-      });
       await db
         .prepare(
-          "UPDATE workers SET settlement_interval_days = ?, settlement_time = ?, next_settlement_at = ? WHERE id = ?",
+          "UPDATE workers SET settlement_interval_days = ?, settlement_reminder_hours = ? WHERE id = ?",
         )
         .bind(
           config.interval_days,
-          config.settlement_time,
-          nextSettlementAt,
+          config.reminder_hours,
           workerId,
         )
         .run();
@@ -1278,25 +1475,15 @@ export async function POST(request: Request) {
             existingWorker.settlement_config,
           )
         : existingWorker.settlement_config;
-      const nextSettlementAt = Object.prototype.hasOwnProperty.call(
-        data,
-        "settlement_config",
-      )
-        ? calculateNextSettlementTime({
-            joined_at: existingWorker.joined_at,
-            settlement_config: { ...config, next_settlement_at: null },
-          })
-        : existingWorker.settlement_config.next_settlement_at;
 
       const result = await db
-        .prepare("UPDATE workers SET name = ?, tier = ?, worker_type = ?, settlement_interval_days = ?, settlement_time = ?, next_settlement_at = ? WHERE id = ? AND (status = 'idle' OR (tier = ? AND worker_type = ?))")
+        .prepare("UPDATE workers SET name = ?, tier = ?, worker_type = ?, settlement_interval_days = ?, settlement_reminder_hours = ? WHERE id = ? AND (status = 'idle' OR (tier = ? AND worker_type = ?))")
         .bind(
           name,
           tier ?? "",
           workerType,
           config.interval_days,
-          config.settlement_time,
-          nextSettlementAt,
+          config.reminder_hours,
           workerId,
           tier ?? "",
           workerType,
@@ -1522,6 +1709,7 @@ export async function POST(request: Request) {
                   ...entry,
                   workerId: worker.id,
                   workerName: worker.name,
+                  workerType: worker.workerType,
                   tier: worker.tier,
                 }
               : entry,
@@ -1557,6 +1745,7 @@ export async function POST(request: Request) {
                 ...entry,
                 workerId: replacement.id,
                 workerName: replacement.name,
+                workerType: replacement.workerType,
                 tier: replacement.tier,
               }
             : entry,
@@ -1569,37 +1758,60 @@ export async function POST(request: Request) {
         fromCents(amounts.orderOriginalTotalCents),
       );
       const createdAt = new Date().toISOString();
-      const [insertResult, , , deleteResult] = await db.batch([
-        db
-          .prepare("INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
-          .bind(
-            newOrderId,
-            row.menu_item_id,
-            JSON.stringify(newAssignedWorkerIds),
-            normalizeOrderType(row.order_type ?? newSnapshot.order_type),
-            row.hours_half_units,
-            row.hourly_rate_snapshot_cents,
-            newSnapshot.split_type,
-            JSON.stringify(specialRequirements),
-            amounts.basePriceSnapshotCents,
-            amounts.specialTotalCents,
-            amounts.totalPriceCents,
-            amounts.orderOriginalTotalCents,
-            JSON.stringify(newSnapshot),
-            createdAt,
-            orderId,
-            oldWorkerId,
-            replacement.id,
-          ),
-        db.prepare("UPDATE workers SET status = 'busy' WHERE id = ? AND status = 'idle' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(replacement.id, newOrderId),
-        db.prepare("UPDATE workers SET status = 'idle' WHERE id = ? AND status = 'busy' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(oldWorkerId, newOrderId),
-        db.prepare("DELETE FROM orders WHERE id = ? AND status = 'active' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(orderId, newOrderId),
-      ]);
-      if (!insertResult.meta.changes || !deleteResult.meta.changes) {
-        return Response.json(
-          { error: "打手状态刚刚发生变化，请重新操作" },
-          { status: 409 },
-        );
+      const settlementPeriodIdsByWorker = parseSettlementIdsByWorker(
+        row.settlement_period_ids_by_worker_json,
+      );
+      delete settlementPeriodIdsByWorker[oldWorkerId];
+      const missingPeriodWorkerIds = newAssignedWorkerIds.filter(
+        (workerId) => !settlementPeriodIdsByWorker[workerId],
+      );
+      const periodSetup = await ensureOrderPeriodsForWorkers(
+        missingPeriodWorkerIds,
+        Date.parse(createdAt),
+      );
+      Object.assign(
+        settlementPeriodIdsByWorker,
+        periodMapFrom(periodSetup.periods),
+      );
+      try {
+        const [insertResult, , , deleteResult] = await db.batch([
+          db
+            .prepare("INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, settlement_period_id, settlement_period_ids_by_worker_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
+            .bind(
+              newOrderId,
+              row.menu_item_id,
+              JSON.stringify(newAssignedWorkerIds),
+              normalizeOrderType(row.order_type ?? newSnapshot.order_type),
+              row.hours_half_units,
+              row.hourly_rate_snapshot_cents,
+              newSnapshot.split_type,
+              JSON.stringify(specialRequirements),
+              amounts.basePriceSnapshotCents,
+              amounts.specialTotalCents,
+              amounts.totalPriceCents,
+              amounts.orderOriginalTotalCents,
+              JSON.stringify(newSnapshot),
+              settlementPeriodIdsByWorker[newAssignedWorkerIds[0]] ?? null,
+              JSON.stringify(settlementPeriodIdsByWorker),
+              createdAt,
+              orderId,
+              oldWorkerId,
+              replacement.id,
+            ),
+          db.prepare("UPDATE workers SET status = 'busy' WHERE id = ? AND status = 'idle' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(replacement.id, newOrderId),
+          db.prepare("UPDATE workers SET status = 'idle' WHERE id = ? AND status = 'busy' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(oldWorkerId, newOrderId),
+          db.prepare("DELETE FROM orders WHERE id = ? AND status = 'active' AND EXISTS (SELECT 1 FROM orders WHERE id = ?)").bind(orderId, newOrderId),
+        ]);
+        if (!insertResult.meta.changes || !deleteResult.meta.changes) {
+          await cleanupUnusedPeriods(periodSetup.created);
+          return Response.json(
+            { error: "打手状态刚刚发生变化，请重新操作" },
+            { status: 409 },
+          );
+        }
+      } catch (error) {
+        await cleanupUnusedPeriods(periodSetup.created);
+        throw error;
       }
       return Response.json({
         ...(await readClubData()),
@@ -1784,31 +1996,45 @@ export async function POST(request: Request) {
       calculateSettlement(snapshot, {}, totalPrice);
       const orderId = crypto.randomUUID();
       const createdAt = new Date().toISOString();
+      const periodSetup = await ensureOrderPeriodsForWorkers(
+        workerIds,
+        Date.parse(createdAt),
+      );
+      const settlementPeriodIdsByWorker = periodMapFrom(periodSetup.periods);
+      const settlementPeriodId = periodSetup.periods.get(workerIds[0])?.id ?? null;
       const idleCheck = `SELECT COUNT(*) FROM workers WHERE id IN (${placeholders}) AND status = 'idle'`;
-      const [insertResult] = await db.batch([
-        db.prepare(`INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ? WHERE (${idleCheck}) = ? AND EXISTS (SELECT 1 FROM price_menu WHERE id = ?)`).bind(
-          orderId,
-          menuItemId,
-          JSON.stringify(workerIds),
-          orderType,
-          hours === null ? 0 : Math.round(hours * 2),
-          hourlyRateSnapshotCents,
-          snapshot.split_type,
-          JSON.stringify(specialRequirements),
-          basePriceSnapshotCents,
-          specialTotalCents,
-          totalPriceCents,
-          totalPriceCents,
-          JSON.stringify(snapshot),
-          createdAt,
-          ...workerIds,
-          workerIds.length,
-          menuItemId,
-        ),
-        db.prepare(`UPDATE workers SET status = 'busy' WHERE id IN (${placeholders}) AND EXISTS (SELECT 1 FROM orders WHERE id = ?)`).bind(...workerIds, orderId),
-      ]);
-      if (!insertResult.meta.changes) {
-        return Response.json({ error: "打手状态刚刚发生变化，请重新选择" }, { status: 409 });
+      try {
+        const [insertResult] = await db.batch([
+          db.prepare(`INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, settlement_period_id, settlement_period_ids_by_worker_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (${idleCheck}) = ? AND EXISTS (SELECT 1 FROM price_menu WHERE id = ?)`).bind(
+            orderId,
+            menuItemId,
+            JSON.stringify(workerIds),
+            orderType,
+            hours === null ? 0 : Math.round(hours * 2),
+            hourlyRateSnapshotCents,
+            snapshot.split_type,
+            JSON.stringify(specialRequirements),
+            basePriceSnapshotCents,
+            specialTotalCents,
+            totalPriceCents,
+            totalPriceCents,
+            JSON.stringify(snapshot),
+            settlementPeriodId,
+            JSON.stringify(settlementPeriodIdsByWorker),
+            createdAt,
+            ...workerIds,
+            workerIds.length,
+            menuItemId,
+          ),
+          db.prepare(`UPDATE workers SET status = 'busy' WHERE id IN (${placeholders}) AND EXISTS (SELECT 1 FROM orders WHERE id = ?)`).bind(...workerIds, orderId),
+        ]);
+        if (!insertResult.meta.changes) {
+          await cleanupUnusedPeriods(periodSetup.created);
+          return Response.json({ error: "打手状态刚刚发生变化，请重新选择" }, { status: 409 });
+        }
+      } catch (error) {
+        await cleanupUnusedPeriods(periodSetup.created);
+        throw error;
       }
       return Response.json({ ...(await readClubData()), created_order_id: orderId });
     }
@@ -1848,6 +2074,29 @@ export async function POST(request: Request) {
         fromCents(amounts.orderOriginalTotalCents),
       );
       const workerIds = JSON.parse(row.assigned_worker_ids_json) as string[];
+      const periodIdsByWorker = parseSettlementIdsByWorker(
+        row.settlement_period_ids_by_worker_json,
+      );
+      const missingPeriodWorkerIds = workerIds.filter(
+        (workerId) => !periodIdsByWorker[workerId],
+      );
+      if (missingPeriodWorkerIds.length) {
+        const setup = await ensureOrderPeriodsForWorkers(
+          missingPeriodWorkerIds,
+          Date.parse(row.created_at),
+        );
+        Object.assign(periodIdsByWorker, periodMapFrom(setup.periods));
+        await db
+          .prepare(
+            "UPDATE orders SET settlement_period_id = ?, settlement_period_ids_by_worker_json = ? WHERE id = ? AND status = 'active'",
+          )
+          .bind(
+            periodIdsByWorker[workerIds[0]] ?? null,
+            JSON.stringify(periodIdsByWorker),
+            orderId,
+          )
+          .run();
+      }
       const placeholders = workerIds.map(() => "?").join(", ");
       const completedAt = new Date().toISOString();
       const settlementToken = crypto.randomUUID();

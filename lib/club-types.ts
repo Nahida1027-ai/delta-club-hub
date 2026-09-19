@@ -6,13 +6,13 @@ export type WorkerType = "standard" | "entertainment";
 
 export type SettlementStatus = "pending" | "paid";
 
+export type SettlementPeriodStatus = "active" | "settled";
+
 export interface WorkerSettlementConfig {
-  /** 按上海时区的日历天计算，最小 1 天。 */
+  /** 管理员期望的结算节奏，仅用于提醒和展示，不自动触发。 */
   interval_days: number;
-  /** 24 小时制 HH:mm。 */
-  settlement_time: string;
-  last_settled_at: number | null;
-  next_settlement_at: number | null;
+  /** 待发放记录的超期提醒阈值，单位小时。 */
+  reminder_hours: number;
 }
 
 export type SplitType = "single" | "equal" | "tiered";
@@ -35,6 +35,8 @@ export interface Worker {
   /** 首次工资周期的起点。 */
   joined_at: number;
   settlement_config: WorkerSettlementConfig;
+  /** 首次接单时自动创建；没有接过单时为 null。 */
+  active_period_id: string | null;
 }
 
 export interface Folder {
@@ -56,6 +58,7 @@ export interface TierCommissionRates {
   "1档": number;
   "2档": number;
   "3档": number;
+  "娱乐陪玩": number;
 }
 
 export interface SpecialRequirement {
@@ -87,7 +90,8 @@ export interface PriceMenuItem {
 export interface PayoutWeight {
   workerId: string;
   workerName: string;
-  /** 统一抽成下允许娱乐陪玩以 null 档位参与。 */
+  workerType: WorkerType;
+  /** 娱乐陪玩以 null 档位参与，并使用专属抽成率。 */
   tier: WorkerTier | null;
   weight: number;
 }
@@ -148,6 +152,19 @@ export interface Order {
   settlement_id: string | null;
   /** 双人订单按打手独立结算，避免一人到期后提前锁住另一人的工资。 */
   settlement_ids_by_worker: Record<string, string>;
+  /** 向后兼容的最近一个结算周期 ID。 */
+  settlement_period_id: string | null;
+  /** 双人订单按打手分别关联各自的活跃结算周期。 */
+  settlement_period_ids_by_worker: Record<string, string>;
+}
+
+export interface SettlementPeriod {
+  id: string;
+  worker_id: string;
+  started_at: number;
+  ended_at: number | null;
+  status: SettlementPeriodStatus;
+  settlement_record_id: string | null;
 }
 
 export interface SettlementOrderSnapshot {
@@ -159,6 +176,8 @@ export interface SettlementOrderSnapshot {
 
 export interface SettlementRecord {
   id: string;
+  /** 关联本次手动关闭的工资周期；旧记录使用兼容 ID。 */
+  period_id: string;
   worker_id: string;
   worker_name_snapshot: string;
   worker_type_snapshot: WorkerType;
@@ -180,6 +199,7 @@ export interface ClubData {
   menu: PriceMenuItem[];
   folders: Folder[];
   orders: Order[];
+  settlementPeriods: SettlementPeriod[];
   settlementRecords: SettlementRecord[];
 }
 

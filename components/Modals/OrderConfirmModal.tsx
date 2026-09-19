@@ -35,6 +35,7 @@ import {
   calculateSettlement,
   defaultTierCommissionRates,
   fromCents,
+  getCommissionRate,
   normalizeCompanionHours,
   normalizeOrderType,
   normalizeSpecialRequirements,
@@ -369,9 +370,7 @@ export function OrderConfirmModal({
                   !checked &&
                   (selectedIds.length >= needed ||
                     (item.split_type === "tiered" && sameTierSelected));
-                const tierRate = worker.tier
-                  ? item.tier_commission_rates?.[worker.tier] ?? 0
-                  : item.club_commission_rate;
+                const tierRate = getCommissionRate(item, worker);
                 return (
                   <label
                     key={worker.id}

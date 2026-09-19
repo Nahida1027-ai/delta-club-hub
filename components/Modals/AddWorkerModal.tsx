@@ -184,7 +184,7 @@ export function AddWorkerModal({ open, onOpenChange }: AddWorkerModalProps) {
                 exit={{ opacity: 0, y: -6 }}
                 className="rounded-xl border border-[#BF5AF2]/18 bg-[#BF5AF2]/[0.08] px-3 py-2 text-[13px] leading-5 text-[#D9A0FF]"
               >
-                娱乐陪玩不设档位，可参与统一抽成的单人或双人平分订单。
+                娱乐陪玩不设档位，可参与单人或双人平分订单；按档位抽成时使用专属比例。
               </motion.p>
             )}
           </AnimatePresence>

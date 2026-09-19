@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import type { Order, Worker } from "../lib/club-types";
+import type { Order, SettlementPeriod, SettlementRecord, Worker } from "../lib/club-types";
 import {
-  calculateNextSettlementTime,
+  DEFAULT_SETTLEMENT_REMINDER_HOURS,
   calculateWorkerEarningForOrder,
-  getOrdersInPeriod,
+  defaultSettlementConfig,
+  getOrdersForSettlementPeriod,
+  isSettlementOverdue,
+  normalizeSettlementIntervalDays,
+  normalizeSettlementReminderHours,
 } from "../lib/payroll-settlement";
 
 const start = Date.parse("2025-01-01T10:00:00+08:00");
@@ -19,13 +23,32 @@ const worker: Worker = {
   joined_at: start,
   settlement_config: {
     interval_days: 3,
-    settlement_time: "20:00",
-    last_settled_at: null,
-    next_settlement_at: null,
+    reminder_hours: DEFAULT_SETTLEMENT_REMINDER_HOURS,
   },
+  active_period_id: "period-a",
+};
+const periodA: SettlementPeriod = {
+  id: "period-a",
+  worker_id: worker.id,
+  started_at: start,
+  ended_at: null,
+  status: "active",
+  settlement_record_id: null,
+};
+const periodB: SettlementPeriod = {
+  ...periodA,
+  id: "period-b",
+  worker_id: "worker-b",
 };
 
-assert.equal(calculateNextSettlementTime(worker), periodEnd);
+assert.deepEqual(defaultSettlementConfig(), {
+  interval_days: 3,
+  reminder_hours: 72,
+});
+assert.equal(normalizeSettlementIntervalDays(7), 7);
+assert.equal(normalizeSettlementReminderHours(24), 24);
+assert.throws(() => normalizeSettlementIntervalDays(0), /结算间隔/);
+assert.throws(() => normalizeSettlementReminderHours(0), /待发放提醒/);
 
 const completedOrder: Order = {
   id: "order-boundary",
@@ -57,35 +80,120 @@ const completedOrder: Order = {
     base_price: 168,
     commission_mode: "by_tier",
     club_commission_rate: 0,
-    tier_commission_rates: { "1档": 25, "2档": 20, "3档": 15 },
+    tier_commission_rates: {
+      "1档": 25,
+      "2档": 20,
+      "3档": 15,
+      "娱乐陪玩": 10,
+    },
     split_type: "equal",
     tiered_ratios: null,
     payout_weights: [
-      { workerId: "worker-a", workerName: "一号打手", tier: "1档", weight: 50 },
-      { workerId: "worker-b", workerName: "二号打手", tier: "2档", weight: 50 },
+      {
+        workerId: "worker-a",
+        workerName: "一号打手",
+        workerType: "standard",
+        tier: "1档",
+        weight: 50,
+      },
+      {
+        workerId: "worker-b",
+        workerName: "二号打手",
+        workerType: "standard",
+        tier: "2档",
+        weight: 50,
+      },
     ],
   },
   settled: false,
   settlement_id: "settlement-a",
   settlement_ids_by_worker: { "worker-a": "settlement-a" },
+  settlement_period_id: periodA.id,
+  settlement_period_ids_by_worker: {
+    "worker-a": periodA.id,
+    "worker-b": periodB.id,
+  },
 };
 
 assert.equal(calculateWorkerEarningForOrder(completedOrder, "worker-a"), 73);
 assert.equal(calculateWorkerEarningForOrder(completedOrder, "worker-b"), 67.2);
 
-// A 已归批后不会再次进入 A 的结算，但同一双人订单仍可进入 B 的独立周期。
-assert.equal(getOrdersInPeriod([completedOrder], "worker-a", start, periodEnd).length, 0);
-assert.equal(getOrdersInPeriod([completedOrder], "worker-b", start, periodEnd).length, 1);
+// A 已结算后不会重复进入 A 的结算；同一张双人订单仍能进入 B 的独立周期。
+assert.equal(
+  getOrdersForSettlementPeriod([completedOrder], "worker-a", periodA, periodEnd).length,
+  0,
+);
+assert.equal(
+  getOrdersForSettlementPeriod([completedOrder], "worker-b", periodB, periodEnd).length,
+  1,
+);
 
-const unsettledAtBoundary = {
+const unsettledAtBoundary: Order = {
   ...completedOrder,
   settlement_id: null,
   settlement_ids_by_worker: {},
 };
 assert.equal(
-  getOrdersInPeriod([unsettledAtBoundary], "worker-a", start, periodEnd).length,
+  getOrdersForSettlementPeriod(
+    [unsettledAtBoundary],
+    "worker-a",
+    periodA,
+    periodEnd,
+  ).length,
   1,
-  "period_end 边界上的订单必须归入本批次",
+  "ended_at 边界上的订单必须归入当前周期",
+);
+assert.equal(
+  getOrdersForSettlementPeriod(
+    [unsettledAtBoundary],
+    "worker-a",
+    { ...periodA, id: "another-period" },
+    periodEnd,
+  ).length,
+  0,
+  "订单只能归入自己明确关联的周期",
 );
 
-console.log("Payroll settlement checks passed.");
+const pendingRecord: SettlementRecord = {
+  id: "settlement-a",
+  period_id: periodA.id,
+  worker_id: worker.id,
+  worker_name_snapshot: worker.name,
+  worker_type_snapshot: worker.workerType,
+  period_start: start,
+  period_end: periodEnd,
+  order_ids: [completedOrder.id],
+  order_details: [{
+    order_id: completedOrder.id,
+    service_name: completedOrder.pricing_snapshot.service_name,
+    completed_at: completedOrder.completed_at!,
+    worker_amount: 73,
+  }],
+  total_orders: 1,
+  total_amount: 73,
+  status: "pending",
+  paid_at: null,
+  note: "",
+  created_at: start,
+};
+assert.equal(
+  isSettlementOverdue(pendingRecord, 72, start + 72 * 60 * 60 * 1000 - 1),
+  false,
+  "提醒阈值前一毫秒不应超期",
+);
+assert.equal(
+  isSettlementOverdue(pendingRecord, 72, start + 72 * 60 * 60 * 1000),
+  true,
+  "达到 72 小时时应立即显示超期",
+);
+assert.equal(
+  isSettlementOverdue(
+    { ...pendingRecord, status: "paid" },
+    1,
+    start + 100 * 60 * 60 * 1000,
+  ),
+  false,
+  "已发放记录不能继续显示超期",
+);
+
+console.log("Payroll verification passed: manual periods, per-worker assignment, boundaries, and reminders.");

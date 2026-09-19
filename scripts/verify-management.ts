@@ -59,7 +59,7 @@ const uniformItem: PriceMenuItem = {
   hourly_rate: 0,
   commission_mode: "uniform",
   club_commission_rate: 20,
-  tier_commission_rates: { "1档": 25, "2档": 20, "3档": 15 },
+  tier_commission_rates: { "1档": 25, "2档": 20, "3档": 15, "娱乐陪玩": 10 },
   split_type: "single",
   tiered_ratios: null,
   eligible_tiers: ["1档", "2档", "3档"],
@@ -75,10 +75,9 @@ const entertainmentWorker: Worker = {
   joined_at: 0,
   settlement_config: {
     interval_days: 3,
-    settlement_time: "20:00",
-    last_settled_at: null,
-    next_settlement_at: null,
+    reminder_hours: 72,
   },
+  active_period_id: null,
 };
 const standardWorker: Worker = {
   ...entertainmentWorker,
@@ -100,8 +99,8 @@ assert.equal(
 );
 assert.equal(
   isWorkerEligibleForMenuItem({ ...uniformItem, commission_mode: "by_tier" }, entertainmentWorker),
-  false,
-  "娱乐陪玩不能参加按档位抽成订单",
+  true,
+  "娱乐陪玩应可参加按档位抽成订单并使用专属比例",
 );
 assert.equal(
   isWorkerEligibleForMenuItem({ ...uniformItem, split_type: "tiered" }, entertainmentWorker),
@@ -121,12 +120,13 @@ const entertainmentSnapshot: OrderPricingSnapshot = {
   base_price: 100,
   commission_mode: "uniform",
   club_commission_rate: 20,
-  tier_commission_rates: { "1档": 25, "2档": 20, "3档": 15 },
+  tier_commission_rates: { "1档": 25, "2档": 20, "3档": 15, "娱乐陪玩": 10 },
   split_type: "single",
   tiered_ratios: null,
   payout_weights: [{
     workerId: entertainmentWorker.id,
     workerName: entertainmentWorker.name,
+    workerType: "entertainment",
     tier: null,
     weight: 100,
   }],
@@ -142,10 +142,45 @@ assert.deepEqual(
   [{ workerId: entertainmentWorker.id, amount: 90 }],
   "娱乐陪玩工资公式与个人打赏规则必须保持不变",
 );
-assert.throws(
-  () => calculateSettlement({ ...entertainmentSnapshot, commission_mode: "by_tier" }, {}, 100),
-  /娱乐陪玩不能参与按档位抽成订单/,
-  "结算层还应对非法的按档位娱乐陪玩订单进行兜底拒绝",
+const mixedByTierSettlement = calculateSettlement(
+  {
+    ...entertainmentSnapshot,
+    service_name: "一档与娱乐陪玩双人单",
+    base_price: 168,
+    commission_mode: "by_tier",
+    split_type: "equal",
+    payout_weights: [
+      {
+        workerId: standardWorker.id,
+        workerName: standardWorker.name,
+        workerType: "standard",
+        tier: "1档",
+        weight: 50,
+      },
+      {
+        workerId: entertainmentWorker.id,
+        workerName: entertainmentWorker.name,
+        workerType: "entertainment",
+        tier: null,
+        weight: 50,
+      },
+    ],
+  },
+  {},
+  168,
+);
+assert.deepEqual(
+  mixedByTierSettlement.worker_incomes,
+  [
+    { workerId: standardWorker.id, amount: 63 },
+    { workerId: entertainmentWorker.id, amount: 75.6 },
+  ],
+  "168 元按档位双人单必须分别使用一档与娱乐陪玩抽成率",
+);
+assert.equal(
+  mixedByTierSettlement.club_income,
+  29.4,
+  "168 元样例俱乐部抽成必须严格等于 29.4 元",
 );
 
-console.log("Management verification passed: nested folders, cycle guards, worker eligibility, and uniform settlement.");
+console.log("Management verification passed: nested folders, cycle guards, entertainment eligibility, and dedicated commission.");

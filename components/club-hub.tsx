@@ -115,10 +115,9 @@ import { useClubStore } from "@/store/use-club-store";
 import { useClubWebMcp } from "@/hooks/use-club-webmcp";
 import { isWorkerEligibleForMenuItem } from "@/lib/worker-eligibility";
 import {
-  calculateNextSettlementTime,
-  formatSettlementDateTime,
   normalizeSettlementIntervalDays,
-  normalizeSettlementTime,
+  normalizeSettlementReminderHours,
+  isSettlementOverdue,
 } from "@/lib/payroll-settlement";
 
 const glassCard =
@@ -513,7 +512,7 @@ function ServiceRule({ item }: { item: PriceMenuItem }) {
         <>
           <span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 text-[#64D2FF]">按档位抽成</span>
           <span className="rounded-lg bg-white/[0.055] px-2.5 py-1 text-white/55">
-            1档 {item.tier_commission_rates["1档"]}% · 2档 {item.tier_commission_rates["2档"]}% · 3档 {item.tier_commission_rates["3档"]}%
+            1档 {item.tier_commission_rates["1档"]}% · 2档 {item.tier_commission_rates["2档"]}% · 3档 {item.tier_commission_rates["3档"]}% · 娱乐 {item.tier_commission_rates["娱乐陪玩"] ?? 0}%
           </span>
         </>
       ) : (
@@ -666,7 +665,27 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
   const deleteWorker = useClubStore((state) => state.deleteWorker);
   const cancelAndReassign = useClubStore((state) => state.cancelAndReassign);
   const reorderWorkers = useClubStore((state) => state.reorderWorkers);
+  const settlementRecords = useClubStore((state) => state.settlementRecords);
   const isMutating = useClubStore((state) => state.is_mutating);
+  const [overdueNow, setOverdueNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setOverdueNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const overdueWorkerIds = useMemo(() => {
+    const workersById = new Map(workers.map((worker) => [worker.id, worker]));
+    return new Set(
+      settlementRecords
+        .filter((record) =>
+          isSettlementOverdue(
+            record,
+            workersById.get(record.worker_id)?.settlement_config.reminder_hours ?? 72,
+            overdueNow,
+          ),
+        )
+        .map((record) => record.worker_id),
+    );
+  }, [overdueNow, settlementRecords, workers]);
 
   async function confirmDeleteWorker() {
     if (!deleting) return;
@@ -729,6 +748,7 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
               (order) => order.status === "active" && order.assigned_worker_ids.includes(worker.id),
             );
             const busy = worker.status === "busy";
+            const hasOverduePayroll = overdueWorkerIds.has(worker.id);
             return (
               <article className={`${glassCard} group h-full overflow-hidden p-5 ${busy ? "shadow-[0_22px_58px_rgba(255,69,58,.12)]" : "shadow-[0_18px_48px_rgba(0,0,0,.2)]"}`}>
                 <div className="flex items-start justify-between gap-3">
@@ -745,6 +765,13 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                     </div>
                   </div>
                   <div className="flex shrink-0 items-start gap-1.5">
+                    {hasOverduePayroll ? (
+                      <span
+                        title="有待发放工资超期"
+                        aria-label="有待发放工资超期"
+                        className="mt-1 inline-flex size-3 rounded-full bg-[#FF3B30] shadow-[0_0_12px_rgba(255,59,48,.9)]"
+                      />
+                    ) : null}
                     <div className="flex flex-col items-end gap-1.5">
                       {worker.workerType === "standard" && worker.tier ? <TierBadge tier={worker.tier} /> : null}
                       <span className={`rounded-md px-2 py-1 text-[11px] ${worker.workerType === "entertainment" ? "bg-[#BF5AF2]/14 text-[#D9A0FF]" : "bg-[#007AFF]/10 text-[#8EC9FF]"}`}>
@@ -908,26 +935,18 @@ function EditWorkerDialog({
   const [intervalDays, setIntervalDays] = useState(
     String(worker?.settlement_config.interval_days ?? 3),
   );
-  const [settlementTime, setSettlementTime] = useState(
-    worker?.settlement_config.settlement_time ?? "20:00",
+  const [reminderHours, setReminderHours] = useState(
+    String(worker?.settlement_config.reminder_hours ?? 72),
   );
-  const nextSettlementPreview = useMemo(() => {
-    if (!worker) return null;
+  const settlementConfigValid = useMemo(() => {
     try {
-      const interval_days = normalizeSettlementIntervalDays(intervalDays);
-      const settlement_time = normalizeSettlementTime(settlementTime);
-      return calculateNextSettlementTime({
-        joined_at: worker.joined_at,
-        settlement_config: {
-          ...worker.settlement_config,
-          interval_days,
-          settlement_time,
-        },
-      });
+      normalizeSettlementIntervalDays(intervalDays);
+      normalizeSettlementReminderHours(reminderHours);
+      return true;
     } catch {
-      return null;
+      return false;
     }
-  }, [intervalDays, settlementTime, worker]);
+  }, [intervalDays, reminderHours]);
 
   if (!worker) return null;
   const busy = worker.status === "busy";
@@ -936,12 +955,12 @@ function EditWorkerDialog({
     if (!name.trim()) return;
     try {
       const interval_days = normalizeSettlementIntervalDays(intervalDays);
-      const settlement_time = normalizeSettlementTime(settlementTime);
+      const reminder_hours = normalizeSettlementReminderHours(reminderHours);
       await updateWorker(worker!.id, {
         name,
         tier,
         workerType,
-        settlement_config: { interval_days, settlement_time },
+        settlement_config: { interval_days, reminder_hours },
       });
       toast.success("打手信息已更新");
       onOpenChange(false);
@@ -1013,7 +1032,7 @@ function EditWorkerDialog({
                 exit={{ opacity: 0, y: -6 }}
                 className="rounded-xl border border-[#BF5AF2]/18 bg-[#BF5AF2]/[0.08] px-3 py-2 text-[13px] leading-5 text-[#D9A0FF]"
               >
-                娱乐陪玩不设档位，仅参与统一抽成的单人或双人平分订单。
+                娱乐陪玩不设档位；按档位抽成时使用服务配置中的娱乐陪玩专属比例。
               </motion.p>
             )}
           </AnimatePresence>
@@ -1023,7 +1042,7 @@ function EditWorkerDialog({
                 <CalendarClock className="size-4 text-[#64D2FF]" />结算配置
               </p>
               <p className="mt-1 text-[12px] leading-5 text-white/35">
-                按上海时区的日历天批量归单；修改后立即重算下次结算时间。
+                周期从首次接单时自动开启；结算由管理员手动执行，间隔仅用于运营提醒。
               </p>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -1040,28 +1059,30 @@ function EditWorkerDialog({
                 />
               </label>
               <label className="space-y-2">
-                <span className="text-sm font-medium text-white/60">结算时间</span>
+                <span className="text-sm font-medium text-white/60">待发放提醒（小时）</span>
                 <Input
-                  type="time"
-                  step={60}
-                  value={settlementTime}
-                  onChange={(event) => setSettlementTime(event.target.value)}
+                  type="number"
+                  min={1}
+                  step={1}
+                  inputMode="numeric"
+                  value={reminderHours}
+                  onChange={(event) => setReminderHours(event.target.value)}
                   className={inputClass}
                 />
               </label>
             </div>
             <div className="flex items-center justify-between gap-3 rounded-xl bg-[#007AFF]/[0.08] px-3 py-2.5">
-              <span className="text-[13px] text-white/45">下次结算时间</span>
+              <span className="text-[13px] text-white/45">当前设置</span>
               <span className="text-right text-[13px] font-medium text-[#8EC9FF]">
-                {nextSettlementPreview
-                  ? formatSettlementDateTime(nextSettlementPreview)
+                {settlementConfigValid
+                  ? `建议每 ${intervalDays} 天结算 · 超过 ${reminderHours} 小时提醒`
                   : "请填写有效配置"}
               </span>
             </div>
           </section>
           <DialogFooter>
             <Button variant="ghost" className="h-11 rounded-xl text-white/60 hover:bg-white/[0.06] hover:text-white" onClick={() => onOpenChange(false)}>取消</Button>
-            <Button className="h-11 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]" disabled={!name.trim() || !nextSettlementPreview || isMutating} onClick={save}>{isMutating ? "正在保存…" : "保存修改"}</Button>
+            <Button className="h-11 rounded-xl bg-[#007AFF] text-white hover:bg-[#1685ff]" disabled={!name.trim() || !settlementConfigValid || isMutating} onClick={save}>{isMutating ? "正在保存…" : "保存修改"}</Button>
           </DialogFooter>
         </SpringDialogPanel>
       </DialogContent>
@@ -1366,7 +1387,7 @@ function PriceMenuPanel({ menu, folders }: { menu: PriceMenuItem[]; folders: Fol
                 {item.commission_mode === "by_tier" ? (
                   <div className="mt-1 lg:mt-0">
                     <span className="rounded-lg bg-[#007AFF]/10 px-2.5 py-1 text-sm font-medium text-[#64D2FF]">按档位</span>
-                    <p className="mt-2 whitespace-nowrap text-[12px] text-white/38">1档 {item.tier_commission_rates["1档"]}% / 2档 {item.tier_commission_rates["2档"]}% / 3档 {item.tier_commission_rates["3档"]}%</p>
+                    <p className="mt-2 text-[12px] text-white/38">1档 {item.tier_commission_rates["1档"]}% / 2档 {item.tier_commission_rates["2档"]}% / 3档 {item.tier_commission_rates["3档"]}% / 娱乐 {item.tier_commission_rates["娱乐陪玩"] ?? 0}%</p>
                   </div>
                 ) : (
                   <span className="mt-1 inline-flex rounded-lg bg-[#007AFF]/10 px-2.5 py-1 text-sm font-medium text-[#64D2FF] lg:mt-0">统一 {item.club_commission_rate}%</span>
@@ -1439,7 +1460,7 @@ function OrderHistoryItem({
   const tipsByWorker = resolveOrderTipsByWorker(order);
   const totalTip = orderTipTotal(order);
   const commissionText = order.pricing_snapshot.commission_mode === "by_tier"
-    ? `档位抽成 1档 ${order.pricing_snapshot.tier_commission_rates["1档"]}% / 2档 ${order.pricing_snapshot.tier_commission_rates["2档"]}% / 3档 ${order.pricing_snapshot.tier_commission_rates["3档"]}%`
+    ? `档位抽成 1档 ${order.pricing_snapshot.tier_commission_rates["1档"]}% / 2档 ${order.pricing_snapshot.tier_commission_rates["2档"]}% / 3档 ${order.pricing_snapshot.tier_commission_rates["3档"]}% / 娱乐 ${order.pricing_snapshot.tier_commission_rates["娱乐陪玩"] ?? 0}%`
     : `统一抽成 ${order.pricing_snapshot.club_commission_rate}%`;
 
   return (
@@ -1703,25 +1724,12 @@ export function ClubHub() {
   const error = useClubStore((state) => state.error);
   const lastSyncedAt = useClubStore((state) => state.last_synced_at);
   const load = useClubStore((state) => state.load);
-  const checkAndGenerateSettlements = useClubStore(
-    (state) => state.checkAndGenerateSettlements,
-  );
   const [selectedMonth, setSelectedMonth] = useState(() => monthKey());
   const [tab, setTab] = useState("dashboard");
 
   useEffect(() => {
     void load();
   }, [load]);
-
-  useEffect(() => {
-    if (!isReady) return;
-    const check = () => {
-      void checkAndGenerateSettlements().catch(() => undefined);
-    };
-    check();
-    const timer = window.setInterval(check, 60_000);
-    return () => window.clearInterval(timer);
-  }, [checkAndGenerateSettlements, isReady]);
 
   if (!isReady) return <LoadingState />;
 
@@ -1744,7 +1752,7 @@ export function ClubHub() {
             <span className="relative grid size-11 shrink-0 place-items-center overflow-hidden rounded-2xl bg-[#007AFF] text-sm font-black tracking-[-0.06em] text-white shadow-[0_10px_30px_rgba(0,122,255,.32)]">DF<span className="absolute inset-x-2 bottom-1 h-px bg-white/35" /></span>
             <div className="min-w-0">
               <h1 className="truncate text-base font-semibold tracking-[-0.02em] text-white sm:text-lg">Delta Force Club Hub</h1>
-              <p className="mt-0.5 hidden text-[13px] text-white/35 sm:block">订单调度与自动结算中枢</p>
+              <p className="mt-0.5 hidden text-[13px] text-white/35 sm:block">订单调度与工资结算中枢</p>
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
