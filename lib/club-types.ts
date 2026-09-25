@@ -4,6 +4,8 @@ export type WorkerStatus = "idle" | "busy";
 
 export type WorkerType = "standard" | "entertainment";
 
+export type WorkerGender = "male" | "female";
+
 export type SettlementStatus = "pending" | "paid";
 
 export type SettlementPeriodStatus = "active" | "settled";
@@ -24,6 +26,8 @@ export type OrderType = "escort" | "companion";
 export interface Worker {
   id: string;
   name: string;
+  /** 仅用于资料展示与筛选，不参与派单、抽成或工资结算。 */
+  gender: WorkerGender;
   /** 娱乐陪玩没有档位；普通打手必须保留 1档 / 2档 / 3档。 */
   tier: WorkerTier | null;
   /** 用于运营标识与派单边界；不直接改变既有财务公式。 */

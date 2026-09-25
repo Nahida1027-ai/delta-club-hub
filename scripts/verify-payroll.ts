@@ -15,6 +15,7 @@ const periodEnd = Date.parse("2025-01-04T20:00:00+08:00");
 const worker: Worker = {
   id: "worker-a",
   name: "一号打手",
+  gender: "male",
   tier: "1档",
   workerType: "standard",
   order: 0,

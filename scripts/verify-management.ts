@@ -12,6 +12,7 @@ import {
 } from "../lib/folder-tree";
 import { calculateSettlement } from "../lib/settlement";
 import { isWorkerEligibleForMenuItem } from "../lib/worker-eligibility";
+import { normalizeWorkerGender } from "../lib/worker-profile";
 
 const folders: Folder[] = [
   { id: "root-b", name: "根 B", parentId: null, order: 0, createdAt: 2 },
@@ -67,6 +68,7 @@ const uniformItem: PriceMenuItem = {
 const entertainmentWorker: Worker = {
   id: "entertainment",
   name: "娱乐陪玩",
+  gender: "female",
   tier: null,
   workerType: "entertainment",
   order: 0,
@@ -83,9 +85,14 @@ const standardWorker: Worker = {
   ...entertainmentWorker,
   id: "standard",
   name: "普通打手",
+  gender: "male",
   tier: "1档",
   workerType: "standard",
 };
+
+assert.equal(normalizeWorkerGender(undefined), "male", "旧打手缺失性别时应兼容为男");
+assert.equal(normalizeWorkerGender("female"), "female", "应保留有效的女性标签");
+assert.throws(() => normalizeWorkerGender("unknown"), /有效性别/, "应拒绝非法性别值");
 
 assert.equal(
   isWorkerEligibleForMenuItem(uniformItem, entertainmentWorker),
@@ -183,4 +190,4 @@ assert.equal(
   "168 元样例俱乐部抽成必须严格等于 29.4 元",
 );
 
-console.log("Management verification passed: nested folders, cycle guards, entertainment eligibility, and dedicated commission.");
+console.log("Management verification passed: nested folders, cycle guards, gender compatibility, entertainment eligibility, and dedicated commission.");

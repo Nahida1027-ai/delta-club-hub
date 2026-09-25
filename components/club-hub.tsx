@@ -54,6 +54,7 @@ import { OrderConfirmModal } from "@/components/Modals/OrderConfirmModal";
 import { SortableHandle, SortableList } from "@/components/dnd/SortableList";
 import { ServiceFolderBoard } from "@/components/folders/ServiceFolderBoard";
 import { PayrollSettlementPanel } from "@/components/settlements/PayrollSettlementPanel";
+import { GenderSegmentedControl, WorkerGenderBadge } from "@/components/workers/WorkerGender";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -99,6 +100,7 @@ import type {
   SettlementResult,
   TipsByWorker,
   Worker,
+  WorkerGender,
   WorkerTier,
   WorkerType,
 } from "@/lib/club-types";
@@ -757,7 +759,10 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                       {worker.name.slice(0, 1)}
                     </div>
                     <div className="min-w-0">
-                      <h3 className="truncate text-lg font-semibold text-white">{worker.name}</h3>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <h3 className="truncate text-lg font-semibold text-white">{worker.name}</h3>
+                        <WorkerGenderBadge gender={worker.gender} />
+                      </div>
                       <div className="mt-1 flex items-center gap-2">
                         <span className="status-dot" data-status={worker.status} />
                         <span className={busy ? "text-sm text-[#FF6961]" : "text-sm text-[#5FE778]"}>{busy ? "忙碌" : "空闲"}</span>
@@ -774,7 +779,7 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                     ) : null}
                     <div className="flex flex-col items-end gap-1.5">
                       {worker.workerType === "standard" && worker.tier ? <TierBadge tier={worker.tier} /> : null}
-                      <span className={`rounded-md px-2 py-1 text-[11px] ${worker.workerType === "entertainment" ? "bg-[#BF5AF2]/14 text-[#D9A0FF]" : "bg-[#007AFF]/10 text-[#8EC9FF]"}`}>
+                      <span className={`rounded-md px-2 py-1 text-[11px] ${worker.workerType === "entertainment" ? "bg-[#BF5AF2]/14 text-[#D9A0FF]" : "bg-white/[0.07] text-white/52"}`}>
                         {worker.workerType === "entertainment" ? "娱乐陪玩" : "普通打手"}
                       </span>
                     </div>
@@ -930,6 +935,7 @@ function EditWorkerDialog({
   const updateWorker = useClubStore((state) => state.updateWorker);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [name, setName] = useState(worker?.name ?? "");
+  const [gender, setGender] = useState<WorkerGender>(worker?.gender ?? "male");
   const [tier, setTier] = useState<WorkerTier | null>(worker?.tier ?? null);
   const [workerType, setWorkerType] = useState<WorkerType>(worker?.workerType ?? "standard");
   const [intervalDays, setIntervalDays] = useState(
@@ -958,6 +964,7 @@ function EditWorkerDialog({
       const reminder_hours = normalizeSettlementReminderHours(reminderHours);
       await updateWorker(worker!.id, {
         name,
+        gender,
         tier,
         workerType,
         settlement_config: { interval_days, reminder_hours },
@@ -975,12 +982,24 @@ function EditWorkerDialog({
         <SpringDialogPanel>
           <DialogHeader>
             <DialogTitle className="text-xl">编辑打手信息</DialogTitle>
-            <DialogDescription className="text-white/45">姓名会立即同步到看板、接单列表与排行榜。</DialogDescription>
+            <DialogDescription className="text-white/45">姓名与性别会立即同步到看板及所有关联界面。</DialogDescription>
           </DialogHeader>
           <label className="space-y-2">
             <span className="text-sm font-medium text-white/65">打手姓名</span>
             <Input value={name} maxLength={20} onChange={(event) => setName(event.target.value)} className={inputClass} autoFocus />
           </label>
+          <div className="space-y-2">
+            <span className="flex items-center justify-between text-sm font-medium text-white/65">
+              <span>性别</span>
+              {busy ? <span className="text-[#5FE778]">接单中仍可修改</span> : null}
+            </span>
+            <GenderSegmentedControl
+              value={gender}
+              onChange={setGender}
+              layoutId={`edit-worker-gender-${worker.id}`}
+              disabled={isMutating}
+            />
+          </div>
           <label className="space-y-2">
             <span className="flex items-center justify-between text-sm font-medium text-white/65">
               <span>打手类型</span>
@@ -1001,7 +1020,7 @@ function EditWorkerDialog({
                 <SelectItem value="entertainment">娱乐陪玩</SelectItem>
               </SelectContent>
             </Select>
-            {busy ? <p className="text-[13px] leading-5 text-white/40">该打手正在执行订单，姓名和结算配置仍可修改；档位和类型保持锁定。</p> : null}
+            {busy ? <p className="text-[13px] leading-5 text-white/40">该打手正在执行订单，姓名、性别和结算配置仍可修改；档位和类型保持锁定。</p> : null}
           </label>
           <AnimatePresence initial={false}>
             {workerType === "standard" ? (

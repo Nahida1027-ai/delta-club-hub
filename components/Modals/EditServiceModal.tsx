@@ -664,6 +664,7 @@ function buildPreview(item: PriceMenuItem) {
     validateMenuRule(item);
     const previewBasePrice = calculateOrderBasePrice(item, 1);
     const demoSettlement = {
+      gender: "male" as const,
       joined_at: 0,
       settlement_config: {
         interval_days: 3,

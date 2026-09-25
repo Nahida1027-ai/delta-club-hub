@@ -46,6 +46,7 @@ import {
   validateMenuRule,
 } from "@/lib/settlement";
 import { getDescendantFolderIds, isDescendant } from "@/lib/folder-tree";
+import { normalizeWorkerGender } from "@/lib/worker-profile";
 import {
   isWorkerEligibleForMenuItem,
   isWorkerEligibleForRule,
@@ -56,6 +57,7 @@ export const runtime = "edge";
 interface WorkerRow {
   id: string;
   name: string;
+  gender: string;
   tier: string;
   worker_type: string;
   sort_order: number;
@@ -147,7 +149,7 @@ interface SettlementRecordRow {
 }
 
 const WORKER_SELECT =
-  "SELECT id, name, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id FROM workers";
+  "SELECT id, name, gender, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id FROM workers";
 const ORDER_SELECT =
   "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
 const SETTLEMENT_PERIOD_SELECT =
@@ -183,6 +185,7 @@ function workerFromRow(row: WorkerRow): Worker {
   return {
     id: row.id,
     name: row.name,
+    gender: normalizeWorkerGender(row.gender),
     tier: normalizeWorkerTier(row.tier, workerType),
     workerType,
     order: row.sort_order,
@@ -958,6 +961,7 @@ export async function POST(request: Request) {
       const rawWorker = (payload.worker ?? {}) as Record<string, unknown>;
       const workerId = String(rawWorker.id ?? "").trim();
       const name = String(rawWorker.name ?? "").trim();
+      const gender = normalizeWorkerGender(rawWorker.gender);
       const workerType = normalizeWorkerType(rawWorker.workerType);
       const tier = normalizeWorkerTier(rawWorker.tier, workerType);
       if (!workerId || workerId.length > 128) throw new Error("打手 ID 无效");
@@ -968,10 +972,11 @@ export async function POST(request: Request) {
       const settlementConfig = defaultSettlementConfig();
 
       const result = await db
-        .prepare("INSERT INTO workers (id, name, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id) SELECT ?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM workers), 0), 'idle', 0, ?, ?, ?, NULL WHERE NOT EXISTS (SELECT 1 FROM workers WHERE name = ? COLLATE NOCASE)")
+        .prepare("INSERT INTO workers (id, name, gender, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id) SELECT ?, ?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM workers), 0), 'idle', 0, ?, ?, ?, NULL WHERE NOT EXISTS (SELECT 1 FROM workers WHERE name = ? COLLATE NOCASE)")
         .bind(
           workerId,
           name,
+          gender,
           tier ?? "",
           workerType,
           joinedAt,
@@ -1459,13 +1464,16 @@ export async function POST(request: Request) {
         .bind(workerId)
         .first<WorkerRow>();
       if (!existing) throw new Error("未找到该打手");
+      const gender = Object.prototype.hasOwnProperty.call(data, "gender")
+        ? normalizeWorkerGender(data.gender)
+        : normalizeWorkerGender(existing.gender);
       const existingType = normalizeWorkerType(existing.worker_type);
       const existingTier = normalizeWorkerTier(existing.tier, existingType);
       if (
         existing.status === "busy" &&
         (tier !== existingTier || workerType !== existingType)
       ) {
-        return Response.json({ error: "该打手正在接单，只能修改姓名" }, { status: 409 });
+        return Response.json({ error: "该打手正在接单，只能修改姓名、性别和结算配置" }, { status: 409 });
       }
 
       const existingWorker = workerFromRow(existing);
@@ -1477,9 +1485,10 @@ export async function POST(request: Request) {
         : existingWorker.settlement_config;
 
       const result = await db
-        .prepare("UPDATE workers SET name = ?, tier = ?, worker_type = ?, settlement_interval_days = ?, settlement_reminder_hours = ? WHERE id = ? AND (status = 'idle' OR (tier = ? AND worker_type = ?))")
+        .prepare("UPDATE workers SET name = ?, gender = ?, tier = ?, worker_type = ?, settlement_interval_days = ?, settlement_reminder_hours = ? WHERE id = ? AND (status = 'idle' OR (tier = ? AND worker_type = ?))")
         .bind(
           name,
+          gender,
           tier ?? "",
           workerType,
           config.interval_days,

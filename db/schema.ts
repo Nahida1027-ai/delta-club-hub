@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 export const workers = sqliteTable("workers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
+  gender: text("gender").notNull().default("male"),
   tier: text("tier").notNull(),
   workerType: text("worker_type").notNull().default("standard"),
   sortOrder: integer("sort_order").notNull().default(0),

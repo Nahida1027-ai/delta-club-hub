@@ -21,7 +21,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { WorkerTier, WorkerType } from "@/lib/club-types";
+import { GenderSegmentedControl } from "@/components/workers/WorkerGender";
+import type { WorkerGender, WorkerTier, WorkerType } from "@/lib/club-types";
 import { useClubStore } from "@/store/use-club-store";
 
 const tiers: WorkerTier[] = ["1档", "2档", "3档"];
@@ -37,6 +38,7 @@ export function AddWorkerModal({ open, onOpenChange }: AddWorkerModalProps) {
   const addWorker = useClubStore((state) => state.addWorker);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [name, setName] = useState("");
+  const [gender, setGender] = useState<WorkerGender>("male");
   const [tier, setTier] = useState<WorkerTier | null>("1档");
   const [workerType, setWorkerType] = useState<WorkerType>("standard");
   const [nameTouched, setNameTouched] = useState(false);
@@ -62,7 +64,7 @@ export function AddWorkerModal({ open, onOpenChange }: AddWorkerModalProps) {
     if (!trimmedName || Array.from(trimmedName).length > 20) return;
 
     try {
-      const worker = await addWorker({ name: trimmedName, tier, workerType });
+      const worker = await addWorker({ name: trimmedName, gender, tier, workerType });
       toast.success(`${worker.name} 已加入打手看板`, { duration: 2500 });
       onOpenChange(false);
     } catch (error) {
@@ -121,6 +123,16 @@ export function AddWorkerModal({ open, onOpenChange }: AddWorkerModalProps) {
               </p>
             ) : null}
           </label>
+
+          <div className="space-y-2">
+            <span className="text-sm font-medium text-white/65">性别</span>
+            <GenderSegmentedControl
+              value={gender}
+              onChange={setGender}
+              layoutId="add-worker-gender-indicator"
+              disabled={isMutating}
+            />
+          </div>
 
           <div className="space-y-2">
             <label id="add-worker-type-label" className="text-sm font-medium text-white/65">

@@ -13,6 +13,7 @@ import type {
   SpecialRequirement,
   TipsByWorker,
   Worker,
+  WorkerGender,
   WorkerSettlementConfig,
   WorkerTier,
   WorkerType,
@@ -44,6 +45,7 @@ import {
   isWorkerEligibleForMenuItem,
   isWorkerEligibleForRule,
 } from "@/lib/worker-eligibility";
+import { normalizeWorkerGender } from "@/lib/worker-profile";
 
 interface ApiData extends ClubData {
   created_order_id?: string;
@@ -72,10 +74,11 @@ interface ClubStore extends ClubData {
   error: string | null;
   last_synced_at: string | null;
   load: () => Promise<void>;
-  addWorker: (data: { name: string; tier: WorkerTier | null; workerType?: WorkerType }) => Promise<Worker>;
+  addWorker: (data: { name: string; gender: WorkerGender; tier: WorkerTier | null; workerType?: WorkerType }) => Promise<Worker>;
   addMenuItem: (data: MenuItemInput) => Promise<PriceMenuItem>;
   updateWorker: (id: string, data: {
     name: string;
+    gender: WorkerGender;
     tier: WorkerTier | null;
     workerType: WorkerType;
     settlement_config?: Pick<WorkerSettlementConfig, "interval_days" | "reminder_hours">;
@@ -287,6 +290,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     if (!name) throw new Error("请输入打手姓名");
     if (Array.from(name).length > 20) throw new Error("打手姓名最多 20 个字符");
     const workerType = validateWorkerType(data.workerType);
+    const gender = normalizeWorkerGender(data.gender);
     const tier = validateWorkerTier(data.tier, workerType);
     if (
       state.workers.some(
@@ -301,6 +305,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     const worker: Worker = {
       id: crypto.randomUUID(),
       name,
+      gender,
       tier,
       workerType,
       order: state.workers.length
@@ -709,12 +714,15 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     if (!name) throw new Error("请输入打手姓名");
     if (Array.from(name).length > 20) throw new Error("打手姓名最多 20 个字符");
     const workerType = validateWorkerType(data.workerType);
+    const gender = data.gender === undefined
+      ? normalizeWorkerGender(worker.gender)
+      : normalizeWorkerGender(data.gender);
     const tier = validateWorkerTier(data.tier, workerType);
     if (
       worker.status === "busy" &&
       (tier !== worker.tier || workerType !== worker.workerType)
     ) {
-      throw new Error("该打手正在接单，只能修改姓名");
+      throw new Error("该打手正在接单，只能修改姓名、性别和结算配置");
     }
     const settlementConfig = data.settlement_config
       ? {
@@ -735,6 +743,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
           ? {
               ...candidate,
               name,
+              gender,
               tier,
               workerType,
               settlement_config: settlementConfig,
@@ -750,6 +759,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         worker_id: id,
         data: {
           name,
+          gender,
           tier,
           workerType,
           ...(data.settlement_config
