@@ -14,7 +14,8 @@
     "db:generate": "drizzle-kit generate",
     "verify:settlement": "node --import tsx scripts/verify-settlement.ts",
     "verify:management": "node --import tsx scripts/verify-management.ts",
-    "verify:payroll": "node --import tsx scripts/verify-payroll.ts"
+    "verify:payroll": "node --import tsx scripts/verify-payroll.ts",
+    "verify:export": "node --import tsx scripts/verify-export.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -29,6 +30,7 @@
     "date-fns": "^4.4.0",
     "drizzle-orm": "0.45.2",
     "embla-carousel-react": "^8.6.0",
+    "exceljs": "^4.4.0",
     "framer-motion": "^13.2.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^1.31.0",

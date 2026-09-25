@@ -52,6 +52,7 @@ import { AddWorkerModal } from "@/components/Modals/AddWorkerModal";
 import { EditServiceModal } from "@/components/Modals/EditServiceModal";
 import { OrderConfirmModal } from "@/components/Modals/OrderConfirmModal";
 import { SortableHandle, SortableList } from "@/components/dnd/SortableList";
+import { ExportDataButton } from "@/components/exports/ExportDataButton";
 import { ServiceFolderBoard } from "@/components/folders/ServiceFolderBoard";
 import { PayrollSettlementPanel } from "@/components/settlements/PayrollSettlementPanel";
 import { GenderSegmentedControl, WorkerGenderBadge } from "@/components/workers/WorkerGender";
@@ -1775,6 +1776,7 @@ export function ClubHub() {
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
+            <ExportDataButton />
             <div className="hidden items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2 md:flex">
               <span className="status-dot" data-status={error ? "busy" : "idle"} />
               <span className="text-sm text-white/48">{error ? "同步异常" : lastSyncedAt ? "账本已同步" : "准备同步"}</span>
