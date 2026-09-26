@@ -109,8 +109,6 @@ import {
   calculateSettlement,
   normalizeOrderType,
   orderTypeLabel,
-  orderTipTotal,
-  resolveOrderTipsByWorker,
   splitLabel,
   tipsByWorkerTotal,
 } from "@/lib/settlement";
@@ -122,6 +120,13 @@ import {
   normalizeSettlementReminderHours,
   isSettlementOverdue,
 } from "@/lib/payroll-settlement";
+import {
+  deriveWorkerOrderEarnings,
+  resolveWorkerOrderEarnings,
+  resolveWorkerTipEarnings,
+  totalEarningsMap,
+  workerOrderEarningForOrder,
+} from "@/lib/order-earnings";
 
 const glassCard =
   "rounded-[22px] border border-white/[0.08] bg-[#1c1c1e]/75 shadow-[0_18px_50px_rgba(0,0,0,0.22)] backdrop-blur-md";
@@ -329,10 +334,15 @@ function Dashboard({
     [orders, selectedMonth],
   );
   const clubIncome = completed.reduce((sum, order) => sum + (order.final_club_income ?? 0), 0);
-  const workerExpense = completed.reduce(
-    (sum, order) => sum + order.final_worker_incomes.reduce((inner, item) => inner + item.amount, 0),
+  const orderWageExpense = completed.reduce(
+    (sum, order) => sum + totalEarningsMap(resolveWorkerOrderEarnings(order)),
     0,
   );
+  const tipExpense = completed.reduce(
+    (sum, order) => sum + totalEarningsMap(resolveWorkerTipEarnings(order)),
+    0,
+  );
+  const workerExpense = orderWageExpense + tipExpense;
   const [year, month] = selectedMonth.split("-").map(Number);
   const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
   const dailyData = Array.from({ length: daysInMonth }, (_, index) => ({
@@ -350,13 +360,22 @@ function Dashboard({
         tier: worker.tier,
         workerType: worker.workerType,
         orders: relevant.length,
-        income: relevant.reduce(
+        orderIncome: relevant.reduce(
           (sum, order) =>
-            sum + (order.final_worker_incomes.find((item) => item.workerId === worker.id)?.amount ?? 0),
+            sum + (resolveWorkerOrderEarnings(order)[worker.id] ?? 0),
+          0,
+        ),
+        tipIncome: relevant.reduce(
+          (sum, order) =>
+            sum + (resolveWorkerTipEarnings(order)[worker.id] ?? 0),
           0,
         ),
       };
     })
+    .map((worker) => ({
+      ...worker,
+      income: worker.orderIncome + worker.tipIncome,
+    }))
     .sort((a, b) => b.income - a.income);
   const pieData = workerData.filter((worker) => worker.income > 0);
 
@@ -369,9 +388,10 @@ function Dashboard({
         action={<MonthPicker value={selectedMonth} onChange={onMonthChange} />}
       />
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         <MetricCard label="俱乐部总抽成" value={clubIncome} icon={CircleDollarSign} note="打赏不参与抽成" />
-        <MetricCard label="打手总支出" value={workerExpense} icon={WalletCards} tone="violet" note="已完成订单实付合计" />
+        <MetricCard label="订单工资支出" value={orderWageExpense} icon={WalletCards} tone="violet" note="进入工资结算周期" />
+        <MetricCard label="即时打赏支出" value={tipExpense} icon={Sparkles} tone="orange" note="直接到账，不进周期" />
         <MetricCard label="本月净利润" value={clubIncome} icon={Gauge} tone="green" note="当前未计运营成本" />
         <MetricCard label="完成订单" value={completed.length} icon={ShieldCheck} tone="orange" money={false} note={`${orders.filter((order) => order.status === "active").length} 单正在进行`} />
       </div>
@@ -458,7 +478,9 @@ function Dashboard({
               <TableHead className="h-12 px-5 text-white/40 sm:px-6">打手</TableHead>
               <TableHead className="text-white/40">档位</TableHead>
               <TableHead className="text-right text-white/40">完成单数</TableHead>
-              <TableHead className="pr-5 text-right text-white/40 sm:pr-6">本月收入</TableHead>
+              <TableHead className="text-right text-white/40">订单工资</TableHead>
+              <TableHead className="text-right text-white/40">即时打赏</TableHead>
+              <TableHead className="pr-5 text-right text-white/40 sm:pr-6">本月总收入</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -478,6 +500,8 @@ function Dashboard({
                   )}
                 </TableCell>
                 <TableCell className="text-right font-medium text-white/70">{worker.orders}</TableCell>
+                <TableCell className="text-right text-white/65">{formatMoney(worker.orderIncome)}</TableCell>
+                <TableCell className="text-right text-[#FFB65C]">{formatMoney(worker.tipIncome)}</TableCell>
                 <TableCell className="pr-5 text-right font-semibold text-white sm:pr-6">{formatMoney(worker.income)}</TableCell>
               </TableRow>
             ))}
@@ -752,6 +776,17 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
             );
             const busy = worker.status === "busy";
             const hasOverduePayroll = overdueWorkerIds.has(worker.id);
+            const pendingOrderWage = orders
+              .filter(
+                (order) =>
+                  order.status === "completed" &&
+                  order.assigned_worker_ids.includes(worker.id) &&
+                  !order.settlement_ids_by_worker?.[worker.id],
+              )
+              .reduce(
+                (sum, order) => sum + workerOrderEarningForOrder(order, worker.id),
+                0,
+              );
             return (
               <article className={`${glassCard} group h-full overflow-hidden p-5 ${busy ? "shadow-[0_22px_58px_rgba(255,69,58,.12)]" : "shadow-[0_18px_48px_rgba(0,0,0,.2)]"}`}>
                 <div className="flex items-start justify-between gap-3">
@@ -815,14 +850,18 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                   </Button>
                 </div>
 
-                <div className="mt-4 grid grid-cols-2 gap-2">
+                <div className="mt-4 grid grid-cols-3 gap-2">
                   <div className="rounded-xl bg-white/[0.04] px-3 py-3">
-                    <p className="text-[12px] text-white/35">累计完成</p>
-                    <p className="mt-1 text-lg font-semibold text-white">{worker.total_completed_orders} 单</p>
+                    <p className="text-[11px] text-white/35">待结工资</p>
+                    <p className="mt-1 text-sm font-semibold text-white">{formatMoney(pendingOrderWage)}</p>
                   </div>
                   <div className="rounded-xl bg-white/[0.04] px-3 py-3">
-                    <p className="text-[12px] text-white/35">当前状态</p>
-                    <p className="mt-1 text-lg font-semibold text-white">{busy ? "执行中" : "待命"}</p>
+                    <p className="text-[11px] text-white/35">即时打赏</p>
+                    <p className="mt-1 text-sm font-semibold text-[#FFB65C]">{formatMoney(worker.total_tip_earnings)}</p>
+                  </div>
+                  <div className="rounded-xl bg-white/[0.04] px-3 py-3">
+                    <p className="text-[11px] text-white/35">累计完成</p>
+                    <p className="mt-1 text-sm font-semibold text-white">{worker.total_completed_orders} 单</p>
                   </div>
                 </div>
 
@@ -1187,6 +1226,8 @@ function FinishOrderDialog({
   let preview: SettlementResult | null = null;
   let errorMessage = "";
   let totalTip = 0;
+  let orderWageTotal = 0;
+  let previewOrderEarnings: Record<string, number> = {};
   try {
     order.pricing_snapshot.payout_weights.forEach((weight) => {
       const input = tipInputs[weight.workerId] ?? "0";
@@ -1206,6 +1247,11 @@ function FinishOrderDialog({
       tipsByWorker,
       order.order_original_total,
     );
+    previewOrderEarnings = deriveWorkerOrderEarnings(
+      preview.worker_incomes,
+      tipsByWorker,
+    );
+    orderWageTotal = totalEarningsMap(previewOrderEarnings);
   } catch (error) {
     errorMessage = error instanceof Error ? error.message : "金额无效";
   }
@@ -1214,7 +1260,7 @@ function FinishOrderDialog({
     if (!preview) return;
     try {
       const result = await finishOrder(order!.id, tipsByWorker);
-      toast.success(`结算完成：俱乐部 ${formatMoney(result.club_income)}，打手 ${formatMoney(result.worker_pool)}`);
+      toast.success(`订单工资 ${formatMoney(orderWageTotal)} 已进周期，打赏 ${formatMoney(totalTip)} 已即时到账`);
       onOpenChange(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "结算失败");
@@ -1300,8 +1346,11 @@ function FinishOrderDialog({
                 </motion.div>
               ))}
             </div>
+            <div className="mt-3 rounded-2xl border border-[#FF9F0A]/22 bg-[#FF9F0A]/[0.08] px-4 py-3 text-[13px] leading-5 text-[#FFD18A]">
+              ⚠️ 打赏为即时结算，直接归打手，不计入工资结算周期
+            </div>
             <div className="mt-3 flex items-center justify-between rounded-2xl border border-[#FF9F0A]/18 bg-[#FF9F0A]/[0.07] px-4 py-3">
-              <span className="text-sm text-white/55">总打赏</span>
+              <span className="text-sm text-white/55">本单打赏（即时结算）</span>
               <span className="text-lg font-semibold text-[#FFB65C]">
                 <AnimatedNumber value={errorMessage ? 0 : totalTip} formatter={formatMoney} />
               </span>
@@ -1309,21 +1358,22 @@ function FinishOrderDialog({
           </div>
 
           <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-black/20">
-            <div className="grid grid-cols-2 divide-x divide-white/[0.07] border-b border-white/[0.07]">
+            <div className="grid grid-cols-3 divide-x divide-white/[0.07] border-b border-white/[0.07]">
               <div className="p-3 text-center"><p className="text-[12px] text-white/35">俱乐部实得</p><p className="mt-1 text-sm font-semibold text-[#64D2FF]">{preview ? formatMoney(preview.club_income) : "—"}</p></div>
-              <div className="p-3 text-center"><p className="text-[12px] text-white/35">打手最终合计</p><p className="mt-1 text-sm font-semibold text-[#5FE778]">{preview ? formatMoney(preview.worker_pool) : "—"}</p></div>
+              <div className="p-3 text-center"><p className="text-[12px] text-white/35">打手工资（进周期）</p><p className="mt-1 text-sm font-semibold text-[#5FE778]">{preview ? formatMoney(orderWageTotal) : "—"}</p></div>
+              <div className="p-3 text-center"><p className="text-[12px] text-white/35">打赏（即时到账）</p><p className="mt-1 text-sm font-semibold text-[#FFB65C]">{preview ? formatMoney(totalTip) : "—"}</p></div>
             </div>
             <div className="divide-y divide-white/[0.06]">
               {order.pricing_snapshot.payout_weights.map((weight) => {
                 const income = preview?.worker_incomes.find((item) => item.workerId === weight.workerId);
                 const personalTip = tipsByWorker[weight.workerId] ?? 0;
-                const baseIncome = income ? Number((income.amount - personalTip).toFixed(2)) : null;
+                const baseIncome = income ? previewOrderEarnings[weight.workerId] ?? 0 : null;
                 return (
                   <div key={weight.workerId} className="flex items-center justify-between gap-4 px-4 py-3 text-sm">
                     <span className="flex items-center gap-2 text-white/60">{workerName(workers, weight.workerId, order)}<TierBadge tier={weight.tier} /></span>
                     <span className="text-right">
                       <span className="block font-semibold text-white">{income ? formatMoney(income.amount) : "—"}</span>
-                      <span className="mt-0.5 block text-[11px] text-white/32">{baseIncome === null ? "—" : `${formatMoney(baseIncome)} + 打赏 ${formatMoney(personalTip)}`}</span>
+                      <span className="mt-0.5 block text-[11px] text-white/32">{baseIncome === null ? "—" : `订单工资 ${formatMoney(baseIncome)} + 即时打赏 ${formatMoney(personalTip)}`}</span>
                     </span>
                   </div>
                 );
@@ -1477,8 +1527,9 @@ function OrderHistoryItem({
 }) {
   const [expanded, setExpanded] = useState(false);
   const orderType = normalizeOrderType(order.order_type ?? order.pricing_snapshot.order_type);
-  const tipsByWorker = resolveOrderTipsByWorker(order);
-  const totalTip = orderTipTotal(order);
+  const tipsByWorker = resolveWorkerTipEarnings(order);
+  const orderEarningsByWorker = resolveWorkerOrderEarnings(order);
+  const totalTip = totalEarningsMap(tipsByWorker);
   const commissionText = order.pricing_snapshot.commission_mode === "by_tier"
     ? `档位抽成 1档 ${order.pricing_snapshot.tier_commission_rates["1档"]}% / 2档 ${order.pricing_snapshot.tier_commission_rates["2档"]}% / 3档 ${order.pricing_snapshot.tier_commission_rates["3档"]}% / 娱乐 ${order.pricing_snapshot.tier_commission_rates["娱乐陪玩"] ?? 0}%`
     : `统一抽成 ${order.pricing_snapshot.club_commission_rate}%`;
@@ -1539,7 +1590,7 @@ function OrderHistoryItem({
                   <span>基础价格</span><span className="text-right text-white/75">{formatMoney(order.base_price_snapshot)}</span>
                   <span>特殊需求加价</span><span className="text-right text-[#C4C3FF]">+{formatMoney(order.special_total)}</span>
                   <span>订单总价</span><span className="text-right font-medium text-white">{formatMoney(order.total_price)}</span>
-                  <span>打赏</span><span className="text-right text-[#FFB65C]">+{formatMoney(totalTip)}</span>
+                  <span>即时打赏</span><span className="text-right text-[#FFB65C]">+{formatMoney(totalTip)}</span>
                   <span>俱乐部实得</span><span className="text-right text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</span>
                 </div>
                 <div className="mt-3 border-t border-white/[0.06] pt-3">
@@ -1558,7 +1609,7 @@ function OrderHistoryItem({
                   )}
                 </div>
                 <div className="mt-3 border-t border-white/[0.06] pt-3">
-                  <p className="mb-2 text-white/40">打赏明细</p>
+                  <p className="mb-2 text-white/40">即时打赏明细（不进工资周期）</p>
                   <div className="space-y-1.5">
                     {order.pricing_snapshot.payout_weights.map((weight) => (
                       <div key={weight.workerId} className="flex justify-between gap-3 text-white/65">
@@ -1573,13 +1624,13 @@ function OrderHistoryItem({
                   <div className="space-y-1.5">
                     {order.final_worker_incomes.map((income) => {
                       const personalTip = tipsByWorker[income.workerId] ?? 0;
-                      const baseIncome = Number((income.amount - personalTip).toFixed(2));
+                      const baseIncome = orderEarningsByWorker[income.workerId] ?? 0;
                       return (
                         <div key={income.workerId} className="flex items-start justify-between gap-3 text-white/65">
                           <span>{workerName(workers, income.workerId, order)}</span>
                           <span className="text-right">
                             <span className="block font-medium text-[#5FE778]">{formatMoney(income.amount)}</span>
-                            <span className="mt-0.5 block text-[11px] text-white/30">基础 {formatMoney(baseIncome)} + 打赏 {formatMoney(personalTip)}</span>
+                            <span className="mt-0.5 block text-[11px] text-white/30">订单工资 {formatMoney(baseIncome)} + 即时打赏 {formatMoney(personalTip)}</span>
                           </span>
                         </div>
                       );
@@ -1635,11 +1686,14 @@ function HistoryPanel({
     (order) => order.status === "completed" && inMonth(order.completed_at, selectedMonth),
   );
   const clubIncome = completed.reduce((sum, order) => sum + (order.final_club_income ?? 0), 0);
-  const workerExpense = completed.reduce(
-    (sum, order) => sum + order.final_worker_incomes.reduce((inner, income) => inner + income.amount, 0),
+  const orderWageExpense = completed.reduce(
+    (sum, order) => sum + totalEarningsMap(resolveWorkerOrderEarnings(order)),
     0,
   );
-  const tips = completed.reduce((sum, order) => sum + orderTipTotal(order), 0);
+  const tips = completed.reduce(
+    (sum, order) => sum + totalEarningsMap(resolveWorkerTipEarnings(order)),
+    0,
+  );
 
   async function confirmDeleteOrder() {
     if (!deletingOrder) return;
@@ -1662,8 +1716,8 @@ function HistoryPanel({
       />
       <div className="grid gap-4 sm:grid-cols-3">
         <MetricCard label="俱乐部入账" value={clubIncome} icon={CircleDollarSign} note={`${completed.length} 张已完成订单`} />
-        <MetricCard label="打手应付" value={workerExpense} icon={WalletCards} tone="violet" note="按个人实得金额汇总" />
-        <MetricCard label="老板打赏" value={tips} icon={Sparkles} tone="orange" note="已全额分配给打手" />
+        <MetricCard label="订单工资" value={orderWageExpense} icon={WalletCards} tone="violet" note="进入工资结算周期" />
+        <MetricCard label="即时打赏" value={tips} icon={Sparkles} tone="orange" note="已直接归打手，不进周期" />
       </div>
       <article className={`${glassCard} overflow-hidden`}>
         {completed.length ? (

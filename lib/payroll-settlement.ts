@@ -4,6 +4,7 @@ import type {
   SettlementRecord,
   WorkerSettlementConfig,
 } from "@/lib/club-types";
+import { workerOrderEarningForOrder } from "@/lib/order-earnings";
 
 export const DEFAULT_SETTLEMENT_INTERVAL_DAYS = 3;
 export const DEFAULT_SETTLEMENT_REMINDER_HOURS = 72;
@@ -34,10 +35,18 @@ export function defaultSettlementConfig(): WorkerSettlementConfig {
 }
 
 export function calculateWorkerEarningForOrder(
-  order: Pick<Order, "final_worker_incomes">,
+  order: Pick<
+    Order,
+    | "pricing_snapshot"
+    | "tip"
+    | "tips_by_worker"
+    | "worker_tip_earnings"
+    | "worker_order_earnings"
+    | "final_worker_incomes"
+  >,
   workerId: string,
 ): number {
-  return order.final_worker_incomes.find((income) => income.workerId === workerId)?.amount ?? 0;
+  return workerOrderEarningForOrder(order, workerId);
 }
 
 /**

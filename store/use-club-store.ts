@@ -46,6 +46,10 @@ import {
   isWorkerEligibleForRule,
 } from "@/lib/worker-eligibility";
 import { normalizeWorkerGender } from "@/lib/worker-profile";
+import {
+  deriveWorkerOrderEarnings,
+  resolveWorkerTipEarnings,
+} from "@/lib/order-earnings";
 
 interface ApiData extends ClubData {
   created_order_id?: string;
@@ -181,11 +185,18 @@ function findReplacementWorker(
 
 function decrementCompletionCounts(workers: Worker[], removedOrders: Order[]) {
   const decrements = new Map<string, number>();
+  const tipDeductions = new Map<string, number>();
   removedOrders
     .filter((order) => order.status === "completed")
     .forEach((order) => {
       new Set(order.final_worker_incomes.map((income) => income.workerId)).forEach((workerId) => {
         decrements.set(workerId, (decrements.get(workerId) ?? 0) + 1);
+      });
+      Object.entries(resolveWorkerTipEarnings(order)).forEach(([workerId, amount]) => {
+        tipDeductions.set(
+          workerId,
+          fromCents(toCents(tipDeductions.get(workerId) ?? 0) + toCents(amount)),
+        );
       });
     });
 
@@ -194,6 +205,12 @@ function decrementCompletionCounts(workers: Worker[], removedOrders: Order[]) {
     total_completed_orders: Math.max(
       0,
       worker.total_completed_orders - (decrements.get(worker.id) ?? 0),
+    ),
+    total_tip_earnings: fromCents(
+      Math.max(
+        0,
+        toCents(worker.total_tip_earnings) - toCents(tipDeductions.get(worker.id) ?? 0),
+      ),
     ),
   }));
 }
@@ -313,6 +330,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         : 0,
       status: "idle",
       total_completed_orders: 0,
+      total_tip_earnings: 0,
       joined_at: joinedAt,
       settlement_config: settlementConfig,
       active_period_id: null,
@@ -796,8 +814,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     const removedOrders = state.orders.filter((order) =>
       order.assigned_worker_ids.includes(id),
     );
-    // final_worker_incomes 已包含每名打手的基础工资与个人打赏；删除关联订单后，
-    // 看板、排行榜、总支出及俱乐部收入都会从剩余订单实时重新派生。
+    // 删除关联订单时，订单工资和即时打赏都会从实时汇总中移除；
+    // 待发放记录只回退订单工资，打赏从累计即时打赏中扣除。
     const previous = clubSnapshot(state);
     set({
       workers: decrementCompletionCounts(
@@ -844,8 +862,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
 
     const previous = clubSnapshot(state);
-    // 删除整条历史订单即同时移除 final_worker_incomes（含个人打赏）与
-    // final_club_income；所有财务汇总都基于剩余订单自动回退。
+    // 删除整条历史订单会同时移除订单工资、即时打赏与俱乐部抽成；
+    // 工资周期只回退订单工资，打赏不参与周期金额。
     set({
       workers: decrementCompletionCounts(state.workers, [order]),
       orders: state.orders.filter((candidate) => candidate.id !== orderId),
@@ -1094,6 +1112,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       status: "active",
       tip: 0,
       tips_by_worker: {},
+      worker_order_earnings: {},
+      worker_tip_earnings: {},
       final_club_income: null,
       final_worker_incomes: [],
       special_requirements: normalizedRequirements,
@@ -1150,9 +1170,10 @@ export const useClubStore = create<ClubStore>((set, get) => ({
      * 2. single：打手实得 = 订单总价 × (1 - 该打手档位抽成率)。
      * 3. equal：先把订单总价平分，每名打手实得 = 自己的 1/2 份额 ×
      *    (1 - 自己档位抽成率)；俱乐部抽成 = 订单总价 - 两人基础实得之和。
-     * 4. 每名打手最终收入 = 自己的基础实得 + tips_by_worker[workerId]；
-     *    个人打赏 100% 归本人，不参与抽成，也不再由双人订单自动平分。
-     * 5. 168 元、1档 25%、2档 20% 的 equal 单：两人各分 84 元，
+     * 4. worker_order_earnings = 每名打手的基础实得，只进入工资结算周期；
+     *    worker_tip_earnings = tips_by_worker，100% 即时到账且永不进入周期。
+     * 5. final_worker_incomes 继续保存两者之和，供总收入和历史兼容展示。
+     * 6. 168 元、1档 25%、2档 20% 的 equal 单：两人各分 84 元，
      *    基础实得分别为 63 元、67.2 元，俱乐部实得 37.8 元；若仅给
      *    1档打手打赏 10 元，最终实得为 73 元、67.2 元，俱乐部仍为 37.8 元。
      */
@@ -1166,6 +1187,10 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       normalizedTipsByWorker,
       order.order_original_total,
     );
+    const workerOrderEarnings = deriveWorkerOrderEarnings(
+      settlement.worker_incomes,
+      normalizedTipsByWorker,
+    );
 
     const completedAt = new Date().toISOString();
     const previous = clubSnapshot(state);
@@ -1177,6 +1202,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
               status: "completed",
               tip: totalTip,
               tips_by_worker: normalizedTipsByWorker,
+              worker_order_earnings: workerOrderEarnings,
+              worker_tip_earnings: normalizedTipsByWorker,
               final_club_income: settlement.club_income,
               final_worker_incomes: settlement.worker_incomes,
               completed_at: completedAt,
@@ -1189,6 +1216,10 @@ export const useClubStore = create<ClubStore>((set, get) => ({
               ...worker,
               status: "idle",
               total_completed_orders: worker.total_completed_orders + 1,
+              total_tip_earnings: fromCents(
+                toCents(worker.total_tip_earnings) +
+                  toCents(normalizedTipsByWorker[worker.id] ?? 0),
+              ),
             }
           : worker,
       ),

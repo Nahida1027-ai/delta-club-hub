@@ -671,6 +671,7 @@ function buildPreview(item: PriceMenuItem) {
         reminder_hours: 72,
       },
       active_period_id: null,
+      total_tip_earnings: 0,
     };
     const demoWorkers: Worker[] = item.split_type === "single"
       ? [{ id: "demo-1", name: "示例打手", tier: item.eligible_tiers[0] ?? "1档", workerType: "standard", order: 0, status: "idle", total_completed_orders: 0, ...demoSettlement }]

@@ -61,6 +61,7 @@ import {
   isSettlementOverdue,
 } from "@/lib/payroll-settlement";
 import { fromCents, toCents } from "@/lib/settlement";
+import { workerTipEarningForOrder } from "@/lib/order-earnings";
 import { useClubStore } from "@/store/use-club-store";
 
 const glassCard =
@@ -80,6 +81,15 @@ function totalWorkerAmount(orders: Order[], workerId: string) {
   return fromCents(
     orders.reduce(
       (sum, order) => sum + toCents(calculateWorkerEarningForOrder(order, workerId)),
+      0,
+    ),
+  );
+}
+
+function totalWorkerTips(orders: Order[], workerId: string) {
+  return fromCents(
+    orders.reduce(
+      (sum, order) => sum + toCents(workerTipEarningForOrder(order, workerId)),
       0,
     ),
   );
@@ -112,7 +122,16 @@ function resolveRecordDetails(
   record: SettlementRecord,
   orders: Order[],
 ): SettlementOrderSnapshot[] {
-  if (record.order_details.length) return record.order_details;
+  if (record.order_details.length) {
+    return record.order_details.map((detail) => {
+      if (detail.tip_amount !== undefined) return detail;
+      const order = orders.find((candidate) => candidate.id === detail.order_id);
+      return {
+        ...detail,
+        tip_amount: order ? workerTipEarningForOrder(order, record.worker_id) : 0,
+      };
+    });
+  }
   return record.order_ids.flatMap((orderId) => {
     const order = orders.find((candidate) => candidate.id === orderId);
     if (!order?.completed_at) return [];
@@ -121,6 +140,7 @@ function resolveRecordDetails(
       service_name: order.pricing_snapshot.service_name,
       completed_at: order.completed_at,
       worker_amount: calculateWorkerEarningForOrder(order, record.worker_id),
+      tip_amount: workerTipEarningForOrder(order, record.worker_id),
     }];
   });
 }
@@ -145,6 +165,10 @@ function ActivePeriodCard({
   );
   const amount = useMemo(
     () => totalWorkerAmount(periodOrders, worker.id),
+    [periodOrders, worker.id],
+  );
+  const tipAmount = useMemo(
+    () => totalWorkerTips(periodOrders, worker.id),
     [periodOrders, worker.id],
   );
 
@@ -196,6 +220,11 @@ function ActivePeriodCard({
               <p className="mt-1 text-xl font-semibold text-white">{formatMoney(amount)}</p>
             </div>
           </div>
+          {tipAmount > 0 ? (
+            <p className="mt-2 text-[12px] text-white/35">
+              周期内打赏（已即时结算）：<span className="text-[#FFB65C]">{formatMoney(tipAmount)}</span>
+            </p>
+          ) : null}
           <Button
             disabled={isMutating}
             onClick={() => onSettle(worker, period)}
@@ -242,6 +271,7 @@ function SettlementConfirmDialog({
     [endedAt, orders, target],
   );
   const amount = target ? totalWorkerAmount(periodOrders, target.worker.id) : 0;
+  const tipAmount = target ? totalWorkerTips(periodOrders, target.worker.id) : 0;
   const validationMessage = !target
     ? ""
     : !Number.isFinite(endedAt)
@@ -305,7 +335,8 @@ function SettlementConfirmDialog({
             </div>
           </div>
           <p className="text-[12px] leading-5 text-white/35">
-            确认后会关闭当前周期并立即开启新周期；订单金额、打赏和经营报表不会改变。
+            本次结算不包含打赏，打赏已即时结算给打手。周期内即时打赏共 {formatMoney(tipAmount)}。
+            确认后会关闭当前周期并立即开启新周期，经营报表不会改变。
           </p>
 
           <DialogFooter>
@@ -355,6 +386,11 @@ function SettlementDetailDialog({
                       <p className="mt-1 text-[12px] text-white/35">#{detail.order_id.slice(0, 12)} · 完成于 {new Date(detail.completed_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}</p>
                     </div>
                     <p className="text-base font-semibold text-[#5FE778]">{formatMoney(detail.worker_amount)}</p>
+                    {(detail.tip_amount ?? 0) > 0 ? (
+                      <p className="text-[11px] text-white/30 sm:col-span-2 sm:text-right">
+                        另有即时打赏 {formatMoney(detail.tip_amount ?? 0)}，不计入本次工资
+                      </p>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -374,12 +410,14 @@ function SettlementDetailDialog({
 
 function SettlementCard({
   record,
+  orders,
   overdue,
   now,
   onView,
   onDelete,
 }: {
   record: SettlementRecord;
+  orders: Order[];
   overdue: boolean;
   now: number;
   onView: (record: SettlementRecord) => void;
@@ -391,6 +429,10 @@ function SettlementCard({
   const [note, setNote] = useState(record.note);
   const isPending = record.status === "pending";
   const noteChanged = note.trim() !== record.note;
+  const tipAmount = resolveRecordDetails(record, orders).reduce(
+    (sum, detail) => sum + (detail.tip_amount ?? 0),
+    0,
+  );
 
   async function saveNote() {
     try {
@@ -438,6 +480,9 @@ function SettlementCard({
           <p className="text-[12px] uppercase tracking-[0.16em] text-white/30">应发工资</p>
           <p className="mt-1 text-3xl font-semibold tracking-[-0.035em] text-white">{formatMoney(record.total_amount)}</p>
           <p className="mt-1 text-sm text-white/38">包含 {record.total_orders} 单</p>
+          {tipAmount > 0 ? (
+            <p className="mt-1 text-[12px] text-white/30">另有打赏 {formatMoney(tipAmount)} 已即时结算</p>
+          ) : null}
         </div>
       </div>
 
@@ -607,7 +652,7 @@ export function PayrollSettlementPanel() {
       <AnimatePresence mode="wait" initial={false}>
         <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.2 }} className="space-y-3">
           <AnimatePresence initial={false} mode="popLayout">
-            {visibleRecords.map((record) => <SettlementCard key={record.id} record={record} overdue={overdueIds.has(record.id)} now={now} onView={setViewing} onDelete={setDeleting} />)}
+            {visibleRecords.map((record) => <SettlementCard key={record.id} record={record} orders={orders} overdue={overdueIds.has(record.id)} now={now} onView={setViewing} onDelete={setDeleting} />)}
           </AnimatePresence>
           {!visibleRecords.length ? <div className={`${glassCard} grid min-h-64 place-content-center text-center`}><WalletCards className="mx-auto mb-3 size-9 text-white/20" /><p className="text-sm text-white/40">{tab === "pending" ? "当前没有待发放结算" : "筛选范围内没有历史结算"}</p></div> : null}
         </motion.div>
@@ -621,7 +666,7 @@ export function PayrollSettlementPanel() {
             <AlertDialogHeader>
               <AlertDialogMedia className="bg-[#FF3B30]/12 text-[#FF6961]"><Trash2 className="size-5" /></AlertDialogMedia>
               <AlertDialogTitle>删除工资结算记录</AlertDialogTitle>
-              <AlertDialogDescription className="leading-6 text-white/45">确定要删除该结算记录吗？删除后该记录关联的订单将恢复为未结算状态，并重新计入该打手的下一轮结算。</AlertDialogDescription>
+              <AlertDialogDescription className="leading-6 text-white/45">确定要删除该结算记录吗？删除后只有订单工资会恢复为未结算状态并重新计入下一轮；已即时发放的打赏不会回滚。</AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter className="mt-5">
               <AlertDialogCancel disabled={isMutating} className="border-white/10 bg-white/[0.04] text-white/65 hover:bg-white/[0.08] hover:text-white">取消</AlertDialogCancel>

@@ -36,6 +36,8 @@ export interface Worker {
   order: number;
   status: WorkerStatus;
   total_completed_orders: number;
+  /** 累计即时打赏；打赏已直接归打手，不进入工资结算周期。 */
+  total_tip_earnings: number;
   /** 首次工资周期的起点。 */
   joined_at: number;
   settlement_config: WorkerSettlementConfig;
@@ -123,6 +125,8 @@ export interface WorkerIncome {
 
 export type TipsByWorker = Record<string, number>;
 
+export type WorkerEarningsByWorker = Record<string, number>;
+
 export interface Order {
   id: string;
   menu_item_id: string;
@@ -140,7 +144,12 @@ export interface Order {
   tip: number;
   /** 每名打手独立获得的打赏；旧订单可能为空对象。 */
   tips_by_worker: TipsByWorker;
+  /** 每名打手从订单本身获得的工资，只进入工资结算周期。 */
+  worker_order_earnings: WorkerEarningsByWorker;
+  /** 每名打手即时到账的打赏，不进入工资结算周期。 */
+  worker_tip_earnings: WorkerEarningsByWorker;
   final_club_income: number | null;
+  /** 兼容旧界面与汇总：订单工资 + 即时打赏。 */
   final_worker_incomes: WorkerIncome[];
   special_requirements: SpecialRequirement[];
   base_price_snapshot: number;
@@ -176,6 +185,8 @@ export interface SettlementOrderSnapshot {
   service_name: string;
   completed_at: string;
   worker_amount: number;
+  /** 仅作展示；打赏已即时结算，不计入 worker_amount 或 total_amount。 */
+  tip_amount?: number;
 }
 
 export interface SettlementRecord {

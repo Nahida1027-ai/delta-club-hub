@@ -15,6 +15,7 @@ const workerA = {
   order: 0,
   status: "idle",
   total_completed_orders: 1,
+  total_tip_earnings: 10,
   joined_at: Date.parse("2026-09-01T00:00:00.000Z"),
   settlement_config: { interval_days: 3, reminder_hours: 72 },
   active_period_id: "period-a",
@@ -28,6 +29,7 @@ const workerB: Worker = {
   order: 1,
   status: "idle",
   total_completed_orders: 1,
+  total_tip_earnings: 0,
   joined_at: Date.parse("2026-09-02T00:00:00.000Z"),
   settlement_config: { interval_days: 3, reminder_hours: 72 },
   active_period_id: null,
@@ -68,6 +70,8 @@ const data: ClubData = {
       status: "completed",
       tip: 10,
       tips_by_worker: { "worker-a": 10, "worker-b": 0 },
+      worker_order_earnings: { "worker-a": 86.25, "worker-b": 92 },
+      worker_tip_earnings: { "worker-a": 10, "worker-b": 0 },
       final_club_income: 51.75,
       final_worker_incomes: [
         { workerId: "worker-a", amount: 96.25 },
@@ -126,10 +130,11 @@ const data: ClubData = {
         order_id: "order-1",
         service_name: "双人陪玩",
         completed_at: "2026-09-24T10:00:00.000Z",
-        worker_amount: 96.25,
+        worker_amount: 86.25,
+        tip_amount: 10,
       }],
       total_orders: 1,
-      total_amount: 96.25,
+      total_amount: 86.25,
       status: "pending",
       paid_at: null,
       note: "",
@@ -156,14 +161,21 @@ assert.deepEqual(
 );
 assert.equal(exportData.sheets[0].rows[0][2], "男", "旧打手缺失 gender 时应按男导出");
 assert.equal(exportData.sheets[0].rows[1][2], "女", "女性标签应正确导出");
-assert.equal(exportData.sheets[0].rows[0][7], 96.25, "打手累计收入应包含个人打赏");
+assert.equal(exportData.sheets[0].rows[0][7], 86.25, "打手订单工资累计应排除即时打赏");
+assert.equal(exportData.sheets[0].rows[0][8], 10, "打手即时打赏应独立导出");
+assert.equal(exportData.sheets[0].rows[0][9], 96.25, "打手累计总收入应包含即时打赏");
 assert.equal(exportData.sheets[1].rows[0][15], "热门推荐 / 高端代练", "应递归生成完整文件夹路径");
 assert.match(String(exportData.sheets[2].rows[0][14]), /甲打手:¥10\.00/, "应导出个人打赏明细");
-assert.match(String(exportData.sheets[2].rows[0][16]), /乙陪玩:¥92\.00/, "应导出每名打手最终收入");
+assert.match(String(exportData.sheets[2].rows[0][16]), /甲打手:¥86\.25/, "应导出进入周期的订单工资");
+assert.match(String(exportData.sheets[2].rows[0][17]), /甲打手:¥10\.00/, "应导出即时打赏收入");
+assert.match(String(exportData.sheets[2].rows[0][18]), /乙陪玩:¥92\.00/, "应保留每名打手最终收入");
 assert.equal(exportData.summary.totalClubIncome, 51.75);
+assert.equal(exportData.summary.totalOrderWageExpense, 178.25);
+assert.equal(exportData.summary.totalTipExpense, 10);
 assert.equal(exportData.summary.totalWorkerExpense, 188.25);
 assert.equal(exportData.summary.monthOrders, 1);
-assert.equal(exportData.summary.pendingSettlementAmount, 96.25);
+assert.equal(exportData.summary.pendingSettlementAmount, 86.25);
+assert.equal(exportData.sheets[3].rows[0][9], 10, "结算记录应单列已即时结算的周期打赏");
 assert.equal(exportData.summary.overdueSettlementCount, 1);
 
 const generated = await createClubExportBuffer(data, now);

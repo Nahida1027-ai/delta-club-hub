@@ -21,6 +21,7 @@ const worker: Worker = {
   order: 0,
   status: "idle",
   total_completed_orders: 1,
+  total_tip_earnings: 10,
   joined_at: start,
   settlement_config: {
     interval_days: 3,
@@ -62,6 +63,8 @@ const completedOrder: Order = {
   status: "completed",
   tip: 10,
   tips_by_worker: { "worker-a": 10, "worker-b": 0 },
+  worker_order_earnings: { "worker-a": 63, "worker-b": 67.2 },
+  worker_tip_earnings: { "worker-a": 10, "worker-b": 0 },
   final_club_income: 37.8,
   final_worker_incomes: [
     { workerId: "worker-a", amount: 73 },
@@ -116,8 +119,19 @@ const completedOrder: Order = {
   },
 };
 
-assert.equal(calculateWorkerEarningForOrder(completedOrder, "worker-a"), 73);
+assert.equal(calculateWorkerEarningForOrder(completedOrder, "worker-a"), 63);
 assert.equal(calculateWorkerEarningForOrder(completedOrder, "worker-b"), 67.2);
+
+const legacyCombinedIncomeOrder: Order = {
+  ...completedOrder,
+  worker_order_earnings: {},
+  worker_tip_earnings: {},
+};
+assert.equal(
+  calculateWorkerEarningForOrder(legacyCombinedIncomeOrder, "worker-a"),
+  63,
+  "旧订单的最终收入需扣除个人打赏后再进入工资周期",
+);
 
 // A 已结算后不会重复进入 A 的结算；同一张双人订单仍能进入 B 的独立周期。
 assert.equal(
@@ -168,10 +182,11 @@ const pendingRecord: SettlementRecord = {
     order_id: completedOrder.id,
     service_name: completedOrder.pricing_snapshot.service_name,
     completed_at: completedOrder.completed_at!,
-    worker_amount: 73,
+    worker_amount: 63,
+    tip_amount: 10,
   }],
   total_orders: 1,
-  total_amount: 73,
+  total_amount: 63,
   status: "pending",
   paid_at: null,
   note: "",

@@ -18,6 +18,7 @@ import type {
   TieredRatios,
   TipsByWorker,
   Worker,
+  WorkerEarningsByWorker,
   WorkerIncome,
   WorkerTier,
   WorkerType,
@@ -29,6 +30,11 @@ import {
   normalizeSettlementIntervalDays,
   normalizeSettlementReminderHours,
 } from "@/lib/payroll-settlement";
+import {
+  deriveWorkerOrderEarnings,
+  resolveWorkerTipEarnings,
+  workerTipEarningForOrder,
+} from "@/lib/order-earnings";
 import {
   buildPayoutWeights,
   calculateOrderBasePrice,
@@ -63,6 +69,7 @@ interface WorkerRow {
   sort_order: number;
   status: "idle" | "busy";
   total_completed_orders: number;
+  total_tip_earnings_cents: number;
   joined_at: number;
   settlement_interval_days: number;
   settlement_reminder_hours: number;
@@ -104,6 +111,8 @@ interface OrderRow {
   status: "active" | "completed";
   tip_cents: number;
   tips_by_worker_json: string;
+  worker_order_earnings_json: string;
+  worker_tip_earnings_json: string;
   final_club_income_cents: number | null;
   final_worker_incomes_json: string;
   special_requirements_json: string;
@@ -149,9 +158,9 @@ interface SettlementRecordRow {
 }
 
 const WORKER_SELECT =
-  "SELECT id, name, gender, tier, worker_type, sort_order, status, total_completed_orders, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id FROM workers";
+  "SELECT id, name, gender, tier, worker_type, sort_order, status, total_completed_orders, total_tip_earnings_cents, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id FROM workers";
 const ORDER_SELECT =
-  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
+  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, worker_order_earnings_json, worker_tip_earnings_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
 const SETTLEMENT_PERIOD_SELECT =
   "SELECT id, worker_id, started_at, ended_at, status, settlement_record_id FROM settlement_periods";
 const SETTLEMENT_RECORD_SELECT =
@@ -191,6 +200,7 @@ function workerFromRow(row: WorkerRow): Worker {
     order: row.sort_order,
     status: row.status,
     total_completed_orders: row.total_completed_orders,
+    total_tip_earnings: fromCents(row.total_tip_earnings_cents ?? 0),
     joined_at: row.joined_at,
     settlement_config: {
       interval_days: normalizeSettlementIntervalDays(
@@ -231,6 +241,38 @@ function settlementRecordFromRow(row: SettlementRecordRow): SettlementRecord {
     paid_at: row.paid_at ?? null,
     note: row.note ?? "",
     created_at: row.created_at,
+  };
+}
+
+function hydrateSettlementRecord(
+  record: SettlementRecord,
+  orders: Order[],
+): SettlementRecord {
+  const ordersById = new Map(orders.map((order) => [order.id, order]));
+  const snapshotById = new Map(
+    record.order_details.map((detail) => [detail.order_id, detail]),
+  );
+  const orderDetails = record.order_ids.flatMap((orderId) => {
+    const order = ordersById.get(orderId);
+    if (order?.completed_at) {
+      return [{
+        order_id: order.id,
+        service_name: order.pricing_snapshot.service_name,
+        completed_at: order.completed_at,
+        worker_amount: calculateWorkerEarningForOrder(order, record.worker_id),
+        tip_amount: workerTipEarningForOrder(order, record.worker_id),
+      } satisfies SettlementOrderSnapshot];
+    }
+    const frozen = snapshotById.get(orderId);
+    return frozen ? [frozen] : [];
+  });
+  return {
+    ...record,
+    order_details: orderDetails,
+    total_orders: record.order_ids.length,
+    total_amount: fromCents(
+      orderDetails.reduce((sum, detail) => sum + toCents(detail.worker_amount), 0),
+    ),
   };
 }
 
@@ -345,6 +387,19 @@ function parseStoredTipsByWorker(
     : {};
 }
 
+function parseStoredWorkerEarnings(json: string | null | undefined): WorkerEarningsByWorker {
+  const parsed = JSON.parse(json || "{}") as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("订单收入拆分数据无效");
+  }
+  return Object.fromEntries(
+    Object.entries(parsed as Record<string, unknown>).map(([workerId, amount]) => [
+      workerId,
+      fromCents(Math.max(0, toCents(Number(amount ?? 0)))),
+    ]),
+  );
+}
+
 function orderAmountsFromRow(row: OrderRow, snapshot: OrderPricingSnapshot) {
   const basePriceSnapshotCents = row.base_price_snapshot_cents > 0
     ? row.base_price_snapshot_cents
@@ -373,6 +428,24 @@ function orderFromRow(row: OrderRow): Order {
   const settlementIdsByWorker = parseSettlementIdsByWorker(
     row.settlement_ids_by_worker_json,
   );
+  const tipsByWorker = parseStoredTipsByWorker(
+    row.tips_by_worker_json,
+    pricingSnapshot,
+  );
+  const finalWorkerIncomes = JSON.parse(row.final_worker_incomes_json) as WorkerIncome[];
+  const storedTipEarnings = parseStoredWorkerEarnings(row.worker_tip_earnings_json);
+  const workerTipEarnings = Object.keys(storedTipEarnings).length
+    ? storedTipEarnings
+    : resolveWorkerTipEarnings({
+        pricing_snapshot: pricingSnapshot,
+        tip: fromCents(row.tip_cents),
+        tips_by_worker: tipsByWorker,
+        worker_tip_earnings: {},
+      });
+  const storedOrderEarnings = parseStoredWorkerEarnings(row.worker_order_earnings_json);
+  const workerOrderEarnings = Object.keys(storedOrderEarnings).length
+    ? storedOrderEarnings
+    : deriveWorkerOrderEarnings(finalWorkerIncomes, workerTipEarnings);
   return {
     id: row.id,
     menu_item_id: row.menu_item_id,
@@ -389,12 +462,14 @@ function orderFromRow(row: OrderRow): Order {
     split_type: row.split_type ?? pricingSnapshot.split_type,
     status: row.status,
     tip: fromCents(row.tip_cents),
-    tips_by_worker: parseStoredTipsByWorker(row.tips_by_worker_json, pricingSnapshot),
+    tips_by_worker: tipsByWorker,
+    worker_order_earnings: workerOrderEarnings,
+    worker_tip_earnings: workerTipEarnings,
     final_club_income:
       row.final_club_income_cents === null
         ? null
         : fromCents(row.final_club_income_cents),
-    final_worker_incomes: JSON.parse(row.final_worker_incomes_json) as WorkerIncome[],
+    final_worker_incomes: finalWorkerIncomes,
     special_requirements: parseStoredSpecialRequirements(row.special_requirements_json),
     base_price_snapshot: fromCents(amounts.basePriceSnapshotCents),
     special_total: fromCents(amounts.specialTotalCents),
@@ -513,7 +588,23 @@ async function readClubData(): Promise<ClubData> {
     db.prepare(`${SETTLEMENT_RECORD_SELECT} ORDER BY period_end DESC, created_at DESC`).all<SettlementRecordRow>(),
   ]);
 
-  const workers: Worker[] = workerResult.results.map(workerFromRow);
+  const orders = orderResult.results.map(orderFromRow);
+  const tipTotalsByWorker = new Map<string, number>();
+  orders
+    .filter((order) => order.status === "completed")
+    .forEach((order) => {
+      Object.entries(resolveWorkerTipEarnings(order)).forEach(([workerId, amount]) => {
+        tipTotalsByWorker.set(
+          workerId,
+          fromCents(toCents(tipTotalsByWorker.get(workerId) ?? 0) + toCents(amount)),
+        );
+      });
+    });
+  // 历史数据可能还没有累计字段，读取时始终以订单快照重建，避免重复或漏算。
+  const workers: Worker[] = workerResult.results.map((row) => ({
+    ...workerFromRow(row),
+    total_tip_earnings: tipTotalsByWorker.get(row.id) ?? 0,
+  }));
   const menu: PriceMenuItem[] = menuResult.results.map((row) => ({
     id: row.id,
     service_name: row.service_name,
@@ -536,9 +627,10 @@ async function readClubData(): Promise<ClubData> {
     order: row.sort_order,
     createdAt: row.created_at,
   }));
-  const orders = orderResult.results.map(orderFromRow);
   const settlementPeriods = periodResult.results.map(settlementPeriodFromRow);
-  const settlementRecords = settlementResult.results.map(settlementRecordFromRow);
+  const settlementRecords = settlementResult.results.map((row) =>
+    hydrateSettlementRecord(settlementRecordFromRow(row), orders),
+  );
 
   return { workers, menu, folders, orders, settlementPeriods, settlementRecords };
 }
@@ -627,8 +719,8 @@ async function ensureActivePeriodForWorkerOnServer(
 }
 
 /**
- * 管理员手动关闭当前周期。订单原始金额、打赏、俱乐部收入和经营报表均不改动；
- * 此处只冻结该打手在 [started_at, ended_at] 内已经完成的最终收入。
+ * 管理员手动关闭当前周期。订单原始金额、即时打赏、俱乐部收入和经营报表均不改动；
+ * 此处只冻结该打手在 [started_at, ended_at] 内已经完成的订单工资。
  */
 async function settleWorkerPeriodOnServer(
   workerId: string,
@@ -670,6 +762,7 @@ async function settleWorkerPeriodOnServer(
     service_name: order.pricing_snapshot.service_name,
     completed_at: order.completed_at!,
     worker_amount: calculateWorkerEarningForOrder(order, workerId),
+    tip_amount: workerTipEarningForOrder(order, workerId),
   }));
   const totalAmountCents = orderDetails.reduce(
     (sum, detail) => sum + toCents(detail.worker_amount),
@@ -1527,8 +1620,13 @@ export async function POST(request: Request) {
             .all<SettlementRecordRow>()
         : { results: [] as SettlementRecordRow[] };
       const order = orderFromRow(row);
+      const allOrderResult = await db.prepare(ORDER_SELECT).all<OrderRow>();
+      const allOrders = allOrderResult.results.map(orderFromRow);
       const statements = pendingRecords.results.map((recordRow) => {
-        const record = settlementRecordFromRow(recordRow);
+        const record = hydrateSettlementRecord(
+          settlementRecordFromRow(recordRow),
+          allOrders,
+        );
         const remainingDetails = record.order_details.filter(
           (detail) => detail.order_id !== orderId,
         );
@@ -1555,13 +1653,24 @@ export async function POST(request: Request) {
             record.id,
           );
       });
+      const tipEarnings = resolveWorkerTipEarnings(order);
+      statements.push(
+        ...Object.entries(tipEarnings).map(([workerId, amount]) =>
+          db
+            .prepare(
+              "UPDATE workers SET total_tip_earnings_cents = MAX(0, total_tip_earnings_cents - ?) WHERE id = ?",
+            )
+            .bind(toCents(amount), workerId),
+        ),
+      );
       // 待发放批次随订单回退；已发放批次保留生成时快照与金额，不做追溯扣减。
+      const deleteStatementIndex = statements.length;
       statements.push(
         db.prepare("DELETE FROM orders WHERE id = ? AND status = 'completed'").bind(orderId),
         db.prepare("UPDATE workers SET total_completed_orders = (SELECT COUNT(*) FROM orders AS completed_order WHERE completed_order.status = 'completed' AND EXISTS (SELECT 1 FROM json_each(completed_order.assigned_worker_ids_json) AS assigned WHERE assigned.value = workers.id))"),
       );
       const results = await db.batch(statements);
-      const deleteResult = results.at(-2);
+      const deleteResult = results[deleteStatementIndex];
       if (!deleteResult?.meta.changes) {
         return Response.json({ error: "订单状态刚刚发生变化，未执行删除" }, { status: 409 });
       }
@@ -1594,8 +1703,12 @@ export async function POST(request: Request) {
       const orderResult = await db
         .prepare(ORDER_SELECT)
         .all<OrderRow>();
+      const allOrderModels = orderResult.results.map(orderFromRow);
       const relatedOrders = orderResult.results.filter((order) =>
         (JSON.parse(order.assigned_worker_ids_json) as string[]).includes(workerId),
+      );
+      const relatedOrderModels = allOrderModels.filter((order) =>
+        order.assigned_worker_ids.includes(workerId),
       );
       if (relatedOrders.some((order) => order.status === "active")) {
         return Response.json({ error: "该打手正在接单，无法删除" }, { status: 409 });
@@ -1608,7 +1721,7 @@ export async function POST(request: Request) {
             .all<SettlementRecordRow>()
         : { results: [] as SettlementRecordRow[] };
       const statements = pendingRelatedRecords.results
-        .map(settlementRecordFromRow)
+        .map((row) => hydrateSettlementRecord(settlementRecordFromRow(row), allOrderModels))
         .filter((record) => record.order_ids.some((id) => relatedOrderIds.has(id)))
         .map((record) => {
           const remainingOrderIds = record.order_ids.filter(
@@ -1633,6 +1746,29 @@ export async function POST(request: Request) {
               record.id,
             );
         });
+      const tipDeductions = new Map<string, number>();
+      relatedOrderModels
+        .filter((order) => order.status === "completed")
+        .forEach((order) => {
+          Object.entries(resolveWorkerTipEarnings(order)).forEach(([relatedWorkerId, amount]) => {
+            if (relatedWorkerId === workerId) return;
+            tipDeductions.set(
+              relatedWorkerId,
+              fromCents(
+                toCents(tipDeductions.get(relatedWorkerId) ?? 0) + toCents(amount),
+              ),
+            );
+          });
+        });
+      statements.push(
+        ...[...tipDeductions.entries()].map(([relatedWorkerId, amount]) =>
+          db
+            .prepare(
+              "UPDATE workers SET total_tip_earnings_cents = MAX(0, total_tip_earnings_cents - ?) WHERE id = ?",
+            )
+            .bind(toCents(amount), relatedWorkerId),
+        ),
+      );
       if (relatedOrders.length) {
         // 删除关联订单会一并移除 final_worker_incomes、tips_by_worker_json 与
         // final_club_income；共享订单中其他打手的业绩随后也会按剩余订单重算。
@@ -2071,9 +2207,10 @@ export async function POST(request: Request) {
        * 2. single：打手实得 = 订单总价 × (1 - 该打手档位抽成率)。
        * 3. equal：每人先分订单总价的 1/2，再分别扣除自己档位对应的抽成；
        *    俱乐部实得 = 订单总价 - A 基础实得 - B 基础实得。
-       * 4. 每名打手最终收入 = 自己的基础实得 + tips_by_worker[workerId]；
-       *    打赏 100% 归该打手，不参与抽成，双人订单不再自动平分新打赏。
-       * 5. 样例：168 元 equal 单，1档 25%、2档 20%，两人各自基数为 84 元，
+       * 4. worker_order_earnings = 每名打手的基础实得，只进入工资结算周期；
+       *    worker_tip_earnings = tips_by_worker，100% 即时到账且不进入周期。
+       * 5. final_worker_incomes 保存订单工资 + 即时打赏，供总收入与历史兼容展示。
+       * 6. 样例：168 元 equal 单，1档 25%、2档 20%，两人各自基数为 84 元，
        *    基础实得 63 元和 67.2 元；若仅给 1档打手 10 元打赏，最终实得
        *    73 元和 67.2 元，俱乐部仍实得 37.8 元。
        */
@@ -2082,6 +2219,11 @@ export async function POST(request: Request) {
         tipsByWorker,
         fromCents(amounts.orderOriginalTotalCents),
       );
+      const workerOrderEarnings = deriveWorkerOrderEarnings(
+        settlement.worker_incomes,
+        tipsByWorker,
+      );
+      const workerTipEarnings: WorkerEarningsByWorker = { ...tipsByWorker };
       const workerIds = JSON.parse(row.assigned_worker_ids_json) as string[];
       const periodIdsByWorker = parseSettlementIdsByWorker(
         row.settlement_period_ids_by_worker_json,
@@ -2106,12 +2248,29 @@ export async function POST(request: Request) {
           )
           .run();
       }
-      const placeholders = workerIds.map(() => "?").join(", ");
       const completedAt = new Date().toISOString();
       const settlementToken = crypto.randomUUID();
       const [finishResult] = await db.batch([
-        db.prepare("UPDATE orders SET status = 'completed', tip_cents = ?, tips_by_worker_json = ?, final_club_income_cents = ?, final_worker_incomes_json = ?, completed_at = ?, settlement_token = ? WHERE id = ? AND status = 'active'").bind(toCents(totalTip), JSON.stringify(tipsByWorker), toCents(settlement.club_income), JSON.stringify(settlement.worker_incomes), completedAt, settlementToken, orderId),
-        db.prepare(`UPDATE workers SET status = 'idle', total_completed_orders = total_completed_orders + 1 WHERE id IN (${placeholders}) AND EXISTS (SELECT 1 FROM orders WHERE id = ? AND settlement_token = ?)`).bind(...workerIds, orderId, settlementToken),
+        db.prepare("UPDATE orders SET status = 'completed', tip_cents = ?, tips_by_worker_json = ?, worker_order_earnings_json = ?, worker_tip_earnings_json = ?, final_club_income_cents = ?, final_worker_incomes_json = ?, completed_at = ?, settlement_token = ? WHERE id = ? AND status = 'active'").bind(
+          toCents(totalTip),
+          JSON.stringify(tipsByWorker),
+          JSON.stringify(workerOrderEarnings),
+          JSON.stringify(workerTipEarnings),
+          toCents(settlement.club_income),
+          JSON.stringify(settlement.worker_incomes),
+          completedAt,
+          settlementToken,
+          orderId,
+        ),
+        ...workerIds.map((workerId) =>
+          db.prepare("UPDATE workers SET status = 'idle', total_completed_orders = total_completed_orders + 1, total_tip_earnings_cents = total_tip_earnings_cents + ? WHERE id = ? AND EXISTS (SELECT 1 FROM orders WHERE id = ? AND settlement_token = ?)")
+            .bind(
+              toCents(workerTipEarnings[workerId] ?? 0),
+              workerId,
+              orderId,
+              settlementToken,
+            ),
+        ),
       ]);
       if (!finishResult.meta.changes) {
         return Response.json({ error: "订单已由其他操作结算，未重复入账" }, { status: 409 });

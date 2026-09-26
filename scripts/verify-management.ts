@@ -74,6 +74,7 @@ const entertainmentWorker: Worker = {
   order: 0,
   status: "idle",
   total_completed_orders: 0,
+  total_tip_earnings: 0,
   joined_at: 0,
   settlement_config: {
     interval_days: 3,

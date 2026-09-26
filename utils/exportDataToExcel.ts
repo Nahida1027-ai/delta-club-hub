@@ -9,9 +9,13 @@ import type {
 import { isSettlementOverdue } from "@/lib/payroll-settlement";
 import {
   normalizeOrderType,
-  resolveOrderTipsByWorker,
   splitLabel,
 } from "@/lib/settlement";
+import {
+  resolveWorkerOrderEarnings,
+  resolveWorkerTipEarnings,
+  totalEarningsMap,
+} from "@/lib/order-earnings";
 
 type ExportCell = string | number | boolean;
 
@@ -28,10 +32,14 @@ export interface ClubExportWorkbookData {
   sheets: ExportSheetDefinition[];
   summary: {
     totalClubIncome: number;
+    totalOrderWageExpense: number;
+    totalTipExpense: number;
     totalWorkerExpense: number;
     totalOrders: number;
     totalWorkers: number;
     monthClubIncome: number;
+    monthOrderWageExpense: number;
+    monthTipExpense: number;
     monthWorkerExpense: number;
     monthOrders: number;
     pendingSettlementAmount: number;
@@ -195,10 +203,12 @@ export function buildClubExportWorkbookData(
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
 
   const workerRows = workers.map((worker) => {
-    const totalIncome = completedOrders.reduce(
-      (sum, order) => sum + safeNumber(
-        order.final_worker_incomes?.find((income) => income.workerId === worker.id)?.amount,
-      ),
+    const orderIncome = completedOrders.reduce(
+      (sum, order) => sum + safeNumber(resolveWorkerOrderEarnings(order)[worker.id]),
+      0,
+    );
+    const tipIncome = completedOrders.reduce(
+      (sum, order) => sum + safeNumber(resolveWorkerTipEarnings(order)[worker.id]),
       0,
     );
     return [
@@ -209,7 +219,9 @@ export function buildClubExportWorkbookData(
       worker.workerType === "entertainment" || !worker.tier ? "无" : worker.tier,
       worker.status === "busy" ? "忙碌" : "空闲",
       safeNumber(worker.total_completed_orders),
-      roundMoney(totalIncome),
+      roundMoney(orderIncome),
+      roundMoney(tipIncome),
+      roundMoney(orderIncome + tipIncome),
       safeNumber(worker.settlement_config?.interval_days, DEFAULT_INTERVAL_DAYS),
       safeNumber(worker.settlement_config?.reminder_hours, DEFAULT_REMINDER_HOURS),
       worker.active_period_id ?? "",
@@ -217,7 +229,7 @@ export function buildClubExportWorkbookData(
       safeNumber(worker.order),
       serializeExtraFields(worker, [
         "id", "name", "gender", "workerType", "tier", "status",
-        "total_completed_orders", "settlement_config", "active_period_id",
+        "total_completed_orders", "total_tip_earnings", "settlement_config", "active_period_id",
         "joined_at", "order",
       ]),
     ];
@@ -261,7 +273,8 @@ export function buildClubExportWorkbookData(
   });
 
   const orderRows = orders.map((order) => {
-    const tipsByWorker = resolveOrderTipsByWorker(order);
+    const tipsByWorker = resolveWorkerTipEarnings(order);
+    const orderEarnings = resolveWorkerOrderEarnings(order);
     const item = menuById.get(order.menu_item_id);
     const assignedNames = (order.assigned_worker_ids ?? []).map((id) => resolveWorkerName(id, order));
     const tipDetails = Object.entries(tipsByWorker)
@@ -269,6 +282,12 @@ export function buildClubExportWorkbookData(
       .join("; ");
     const incomeDetails = (order.final_worker_incomes ?? [])
       .map((income) => `${resolveWorkerName(income.workerId, order)}:${displayMoney(income.amount)}`)
+      .join("; ");
+    const orderIncomeDetails = Object.entries(orderEarnings)
+      .map(([workerId, amount]) => `${resolveWorkerName(workerId, order)}:${displayMoney(amount)}`)
+      .join("; ");
+    const tipIncomeDetails = Object.entries(tipsByWorker)
+      .map(([workerId, amount]) => `${resolveWorkerName(workerId, order)}:${displayMoney(amount)}`)
       .join("; ");
     const totalTip = Object.values(tipsByWorker).reduce((sum, amount) => sum + safeNumber(amount), 0);
     const orderType = normalizeOrderType(order.order_type);
@@ -289,6 +308,8 @@ export function buildClubExportWorkbookData(
       roundMoney(safeNumber(order.total_price, order.order_original_total)),
       tipDetails,
       roundMoney(totalTip),
+      orderIncomeDetails,
+      tipIncomeDetails,
       incomeDetails,
       order.final_club_income === null || order.final_club_income === undefined
         ? ""
@@ -302,7 +323,8 @@ export function buildClubExportWorkbookData(
       serializeExtraFields(order, [
         "id", "menu_item_id", "assigned_worker_ids", "order_type", "hours",
         "hourly_rate_snapshot", "split_type", "status", "tip", "tips_by_worker",
-        "final_club_income", "final_worker_incomes", "special_requirements",
+        "worker_order_earnings", "worker_tip_earnings", "final_club_income",
+        "final_worker_incomes", "special_requirements",
         "base_price_snapshot", "special_total", "total_price", "order_original_total",
         "created_at", "completed_at", "pricing_snapshot", "settled", "settlement_id",
         "settlement_ids_by_worker", "settlement_period_id", "settlement_period_ids_by_worker",
@@ -310,27 +332,38 @@ export function buildClubExportWorkbookData(
     ];
   });
 
-  const settlementRecordRows = settlementRecords.map((record) => [
-    record.id,
-    record.worker_id,
-    record.worker_name_snapshot || workerById.get(record.worker_id)?.name || record.worker_id,
-    record.worker_type_snapshot === "entertainment" ? "娱乐陪玩" : "普通打手",
-    record.period_id ?? "",
-    formatExcelDateTime(record.period_start),
-    formatExcelDateTime(record.period_end),
-    safeNumber(record.total_orders, record.order_ids?.length ?? 0),
-    roundMoney(safeNumber(record.total_amount)),
-    record.status === "paid" ? "已发放" : "待发放",
-    formatExcelDateTime(record.paid_at),
-    record.note ?? "",
-    (record.order_ids ?? []).join(", "),
-    formatExcelDateTime(record.created_at),
-    serializeExtraFields(record, [
-      "id", "period_id", "worker_id", "worker_name_snapshot", "worker_type_snapshot",
-      "period_start", "period_end", "order_ids", "order_details", "total_orders",
-      "total_amount", "status", "paid_at", "note", "created_at",
-    ]),
-  ]);
+  const settlementRecordRows = settlementRecords.map((record) => {
+    const detailTipTotal = (record.order_details ?? []).reduce(
+      (sum, detail) => sum + safeNumber(detail.tip_amount),
+      0,
+    );
+    const fallbackTipTotal = (record.order_ids ?? []).reduce((sum, orderId) => {
+      const order = orders.find((candidate) => candidate.id === orderId);
+      return sum + (order ? safeNumber(resolveWorkerTipEarnings(order)[record.worker_id]) : 0);
+    }, 0);
+    return [
+      record.id,
+      record.worker_id,
+      record.worker_name_snapshot || workerById.get(record.worker_id)?.name || record.worker_id,
+      record.worker_type_snapshot === "entertainment" ? "娱乐陪玩" : "普通打手",
+      record.period_id ?? "",
+      formatExcelDateTime(record.period_start),
+      formatExcelDateTime(record.period_end),
+      safeNumber(record.total_orders, record.order_ids?.length ?? 0),
+      roundMoney(safeNumber(record.total_amount)),
+      roundMoney(detailTipTotal || fallbackTipTotal),
+      record.status === "paid" ? "已发放" : "待发放",
+      formatExcelDateTime(record.paid_at),
+      record.note ?? "",
+      (record.order_ids ?? []).join(", "),
+      formatExcelDateTime(record.created_at),
+      serializeExtraFields(record, [
+        "id", "period_id", "worker_id", "worker_name_snapshot", "worker_type_snapshot",
+        "period_start", "period_end", "order_ids", "order_details", "total_orders",
+        "total_amount", "status", "paid_at", "note", "created_at",
+      ]),
+    ];
+  });
 
   const settlementPeriodRows = settlementPeriods.map((period) => [
     period.id,
@@ -367,24 +400,28 @@ export function buildClubExportWorkbookData(
     (sum, order) => sum + safeNumber(order.final_club_income),
     0,
   );
-  const totalWorkerExpense = completedOrders.reduce(
-    (sum, order) => sum + (order.final_worker_incomes ?? []).reduce(
-      (inner, income) => inner + safeNumber(income.amount),
-      0,
-    ),
+  const totalOrderWageExpense = completedOrders.reduce(
+    (sum, order) => sum + totalEarningsMap(resolveWorkerOrderEarnings(order)),
     0,
   );
+  const totalTipExpense = completedOrders.reduce(
+    (sum, order) => sum + totalEarningsMap(resolveWorkerTipEarnings(order)),
+    0,
+  );
+  const totalWorkerExpense = totalOrderWageExpense + totalTipExpense;
   const monthClubIncome = completedThisMonth.reduce(
     (sum, order) => sum + safeNumber(order.final_club_income),
     0,
   );
-  const monthWorkerExpense = completedThisMonth.reduce(
-    (sum, order) => sum + (order.final_worker_incomes ?? []).reduce(
-      (inner, income) => inner + safeNumber(income.amount),
-      0,
-    ),
+  const monthOrderWageExpense = completedThisMonth.reduce(
+    (sum, order) => sum + totalEarningsMap(resolveWorkerOrderEarnings(order)),
     0,
   );
+  const monthTipExpense = completedThisMonth.reduce(
+    (sum, order) => sum + totalEarningsMap(resolveWorkerTipEarnings(order)),
+    0,
+  );
+  const monthWorkerExpense = monthOrderWageExpense + monthTipExpense;
   const pendingSettlementRecords = settlementRecords.filter((record) => record.status === "pending");
   const pendingSettlementAmount = pendingSettlementRecords.reduce(
     (sum, record) => sum + safeNumber(record.total_amount),
@@ -406,22 +443,32 @@ export function buildClubExportWorkbookData(
         id: worker.id,
         name: worker.name || worker.id,
         orders: workerOrders.length,
-        income: roundMoney(workerOrders.reduce(
-          (sum, order) => sum + safeNumber(
-            order.final_worker_incomes?.find((income) => income.workerId === worker.id)?.amount,
-          ),
+        orderIncome: roundMoney(workerOrders.reduce(
+          (sum, order) => sum + safeNumber(resolveWorkerOrderEarnings(order)[worker.id]),
+          0,
+        )),
+        tipIncome: roundMoney(workerOrders.reduce(
+          (sum, order) => sum + safeNumber(resolveWorkerTipEarnings(order)[worker.id]),
           0,
         )),
       };
     })
+    .map((worker) => ({
+      ...worker,
+      income: roundMoney(worker.orderIncome + worker.tipIncome),
+    }))
     .sort((a, b) => b.income - a.income || b.orders - a.orders || a.name.localeCompare(b.name, "zh-CN"));
 
   const summary = {
     totalClubIncome: roundMoney(totalClubIncome),
+    totalOrderWageExpense: roundMoney(totalOrderWageExpense),
+    totalTipExpense: roundMoney(totalTipExpense),
     totalWorkerExpense: roundMoney(totalWorkerExpense),
     totalOrders: orders.length,
     totalWorkers: workers.length,
     monthClubIncome: roundMoney(monthClubIncome),
+    monthOrderWageExpense: roundMoney(monthOrderWageExpense),
+    monthTipExpense: roundMoney(monthTipExpense),
     monthWorkerExpense: roundMoney(monthWorkerExpense),
     monthOrders: completedThisMonth.length,
     pendingSettlementAmount: roundMoney(pendingSettlementAmount),
@@ -430,19 +477,30 @@ export function buildClubExportWorkbookData(
   const summaryRows: ExportCell[][] = [
     ["汇总指标", "数值", "说明", ""],
     ["俱乐部总收入", summary.totalClubIncome, "全部已完成订单俱乐部抽成之和", ""],
-    ["打手总支出", summary.totalWorkerExpense, "全部已完成订单打手最终收入之和（含打赏）", ""],
+    ["订单工资支出", summary.totalOrderWageExpense, "全部已完成订单、进入工资周期的订单收入", ""],
+    ["即时打赏支出", summary.totalTipExpense, "全部已完成订单、已直接归打手的打赏", ""],
+    ["打手总支出", summary.totalWorkerExpense, "订单工资支出 + 即时打赏支出", ""],
     ["总订单数", summary.totalOrders, "包含进行中及已完成订单", ""],
     ["总打手数", summary.totalWorkers, "当前打手档案数量", ""],
     ["本月俱乐部收入", summary.monthClubIncome, `${currentMonth} 已完成订单`, ""],
-    ["本月打手支出", summary.monthWorkerExpense, `${currentMonth} 已完成订单（含打赏）`, ""],
+    ["本月订单工资支出", summary.monthOrderWageExpense, `${currentMonth} 进入工资周期的订单收入`, ""],
+    ["本月即时打赏支出", summary.monthTipExpense, `${currentMonth} 已直接归打手的打赏`, ""],
+    ["本月打手总支出", summary.monthWorkerExpense, `${currentMonth} 订单工资 + 即时打赏`, ""],
     ["本月订单数", summary.monthOrders, `${currentMonth} 已完成订单`, ""],
-    ["待发放结算总额", summary.pendingSettlementAmount, "所有待发放结算记录", ""],
+    ["待发放结算总额", summary.pendingSettlementAmount, "只含订单工资，不含即时打赏", ""],
     ["超期未发放笔数", summary.overdueSettlementCount, "按每名打手的提醒小时判断", ""],
     ["数据导出时间", formatExcelDateTime(now), "北京时间", ""],
     ["", "", "", ""],
     ["打手收入排行", "", "", ""],
-    ["排名", "姓名", "总单数", "总收入"],
-    ...ranking.map((worker, index) => [index + 1, worker.name, worker.orders, worker.income]),
+    ["排名", "姓名", "总单数", "订单工资累计", "打赏累计", "总收入"],
+    ...ranking.map((worker, index) => [
+      index + 1,
+      worker.name,
+      worker.orders,
+      worker.orderIncome,
+      worker.tipIncome,
+      worker.income,
+    ]),
   ];
 
   return {
@@ -452,13 +510,13 @@ export function buildClubExportWorkbookData(
         name: "打手信息",
         headers: [
           "打手ID", "姓名", "性别", "打手类型", "档位", "当前状态", "累计完成单数",
-          "累计总收入（含打赏）", "结算间隔天数", "提醒小时", "当前活跃周期ID", "加入时间",
-          "排序权重", "其他字段",
+          "订单工资累计", "即时打赏累计", "累计总收入", "结算间隔天数", "提醒小时",
+          "当前活跃周期ID", "加入时间", "排序权重", "其他字段",
         ],
         rows: workerRows,
-        currencyColumns: [8],
-        integerColumns: [7, 9, 10, 13],
-        wrapColumns: [14],
+        currencyColumns: [8, 9, 10],
+        integerColumns: [7, 11, 12, 15],
+        wrapColumns: [16],
       },
       {
         name: "价格表",
@@ -479,24 +537,26 @@ export function buildClubExportWorkbookData(
           "订单ID", "服务ID", "服务名称", "订单类型", "陪玩时长（小时）",
           "每小时价格快照", "下单时间", "完成时间", "订单状态", "涉及打手",
           "基础价格快照", "特殊需求明细", "特殊需求总加价", "订单总价", "打赏明细",
-          "总打赏", "各打手最终收入", "俱乐部抽成", "分配模式", "抽成规则快照",
+          "总打赏", "各打手订单收入（进周期）", "各打手打赏收入（即时）",
+          "各打手最终收入", "俱乐部抽成", "分配模式", "抽成规则快照",
           "分配权重快照", "是否已结算", "所属结算记录ID", "所属结算周期ID", "其他字段",
         ],
         rows: orderRows,
-        currencyColumns: [6, 11, 13, 14, 16, 18],
-        wrapColumns: [10, 12, 15, 17, 20, 21, 23, 24, 25],
+        currencyColumns: [6, 11, 13, 14, 16, 20],
+        wrapColumns: [10, 12, 15, 17, 18, 19, 22, 23, 25, 26, 27],
       },
       {
         name: "结算记录",
         headers: [
           "结算记录ID", "打手ID", "打手姓名", "打手类型", "结算周期ID",
           "结算周期开始时间", "结算周期结束时间", "包含订单数", "应发工资总额",
-          "状态", "发放时间", "备注", "关联订单ID列表", "创建时间", "其他字段",
+          "周期内打赏（即时，不计入工资）", "状态", "发放时间", "备注",
+          "关联订单ID列表", "创建时间", "其他字段",
         ],
         rows: settlementRecordRows,
-        currencyColumns: [9],
+        currencyColumns: [9, 10],
         integerColumns: [8],
-        wrapColumns: [12, 13, 15],
+        wrapColumns: [13, 14, 16],
       },
       {
         name: "结算周期",
@@ -539,8 +599,8 @@ function styleWorksheet(
   worksheet: import("exceljs").Worksheet,
   definition: ExportSheetDefinition,
 ) {
-  const headerRows = definition.name === "汇总统计" ? [1, 14] : [1];
-  const sectionRows = definition.name === "汇总统计" ? [13] : [];
+  const headerRows = definition.name === "汇总统计" ? [1, 18] : [1];
+  const sectionRows = definition.name === "汇总统计" ? [17] : [];
   const currencyColumns = new Set(definition.currencyColumns ?? []);
   const integerColumns = new Set(definition.integerColumns ?? []);
   const wrapColumns = new Set(definition.wrapColumns ?? []);
@@ -600,13 +660,17 @@ function styleWorksheet(
     worksheet.getColumn(1).width = 24;
     worksheet.getColumn(2).width = 22;
     worksheet.getColumn(3).width = 46;
-    worksheet.getColumn(4).width = 18;
-    [2, 3, 6, 7, 9].forEach((rowNumber) => {
+    worksheet.getColumn(4).width = 20;
+    worksheet.getColumn(5).width = 18;
+    worksheet.getColumn(6).width = 18;
+    [2, 3, 4, 5, 8, 9, 10, 11, 13].forEach((rowNumber) => {
       worksheet.getCell(rowNumber, 2).numFmt = MONEY_FORMAT;
     });
-    for (let rowNumber = 15; rowNumber <= worksheet.rowCount; rowNumber += 1) {
+    for (let rowNumber = 19; rowNumber <= worksheet.rowCount; rowNumber += 1) {
       worksheet.getCell(rowNumber, 3).numFmt = INTEGER_FORMAT;
       worksheet.getCell(rowNumber, 4).numFmt = MONEY_FORMAT;
+      worksheet.getCell(rowNumber, 5).numFmt = MONEY_FORMAT;
+      worksheet.getCell(rowNumber, 6).numFmt = MONEY_FORMAT;
     }
   }
 }
