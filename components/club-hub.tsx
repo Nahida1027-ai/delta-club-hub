@@ -759,6 +759,13 @@ function WorkerBoard({ workers, orders, menu }: { workers: Worker[]; orders: Ord
             const activeOrder = orders.find(
               (order) => order.status === "active" && order.assigned_worker_ids.includes(worker.id),
             );
+            const activeTransferFees = activeOrder?.transfer_fees_by_worker ?? {};
+            const transferFeeWorkerId = activeOrder?.transfer_fee_worker_id ??
+              Object.entries(activeTransferFees).find(([, amount]) => amount > 0)?.[0] ??
+              null;
+            const workerTransferFee = transferFeeWorkerId === worker.id
+              ? activeTransferFees[worker.id] ?? 0
+              : 0;
             const busy = worker.status === "busy";
             const hasOverduePayroll = overdueWorkerIds.has(worker.id);
             const pendingOrderWage = orders
@@ -862,7 +869,7 @@ function WorkerBoard({ workers, orders, menu }: { workers: Worker[]; orders: Ord
                       <div className="rounded-xl border border-[#FF453A]/15 bg-[#FF453A]/[0.055] p-3">
                         <p className="truncate text-sm font-medium text-white/85">{activeOrder.pricing_snapshot.service_name}</p>
                         <p className="mt-1 text-[12px] text-white/35">订单 #{activeOrder.id.slice(0, 8)}</p>
-                        {activeOrder.order_type === "companion" || activeOrder.special_requirements.length || totalEarningsMap(activeOrder.transfer_fees_by_worker ?? {}) > 0 ? (
+                        {activeOrder.order_type === "companion" || activeOrder.special_requirements.length || workerTransferFee > 0 ? (
                           <div className="mt-2 flex flex-wrap gap-1.5">
                             {activeOrder.order_type === "companion" ? (
                               <span className="rounded-md bg-[#30D158]/15 px-2 py-1 text-[11px] text-[#7EF29A]">
@@ -879,9 +886,9 @@ function WorkerBoard({ workers, orders, menu }: { workers: Worker[]; orders: Ord
                                 </span>
                               </>
                             ) : null}
-                            {totalEarningsMap(activeOrder.transfer_fees_by_worker ?? {}) > 0 ? (
+                            {workerTransferFee > 0 ? (
                               <span className="rounded-md bg-[#30D158]/15 px-2 py-1 text-[11px] text-[#7EF29A]">
-                                转单费 +{formatMoney(totalEarningsMap(activeOrder.transfer_fees_by_worker ?? {}))}
+                                转单费 +{formatMoney(workerTransferFee)}
                               </span>
                             ) : null}
                           </div>
@@ -1231,11 +1238,22 @@ function FinishOrderDialog({
       throw new Error("请检查每名打手的打赏金额");
     }
     totalTip = tipsByWorkerTotal(tipsByWorker);
+    const transferFeeWorkerId = order.transfer_fee_worker_id ??
+      Object.entries(order.transfer_fees_by_worker ?? {}).find(
+        ([, amount]) => amount > 0,
+      )?.[0] ??
+      null;
+    const effectiveTransferFees = transferFeeWorkerId
+      ? {
+          [transferFeeWorkerId]:
+            order.transfer_fees_by_worker?.[transferFeeWorkerId] ?? 0,
+        }
+      : {};
     preview = calculateSettlementWithTransferFees(
       order.pricing_snapshot,
       tipsByWorker,
       order.order_original_total,
-      order.transfer_fees_by_worker,
+      effectiveTransferFees,
     );
     previewOrderEarnings = deriveWorkerOrderEarnings(
       preview.worker_incomes,
@@ -1365,7 +1383,11 @@ function FinishOrderDialog({
                     <span className="flex items-center gap-2 text-white/60">{workerName(workers, weight.workerId, order)}<TierBadge tier={weight.tier} /></span>
                     <span className="text-right">
                       <span className="block font-semibold text-white">{income ? formatMoney(income.amount) : "—"}</span>
-                      <span className="mt-0.5 block text-[11px] text-white/32">{baseIncome === null || orderShare === null ? "—" : `订单份额 ${formatMoney(orderShare)} + 转单费 ${formatMoney(transferFee)} + 即时打赏 ${formatMoney(personalTip)}`}</span>
+                      <span className="mt-0.5 block text-[11px] text-white/32">
+                        {baseIncome === null || orderShare === null
+                          ? "—"
+                          : `订单份额 ${formatMoney(orderShare)}${transferFee > 0 ? ` + 转单费 ${formatMoney(transferFee)}` : ""} + 即时打赏 ${formatMoney(personalTip)}`}
+                      </span>
                     </span>
                   </div>
                 );
@@ -1522,7 +1544,15 @@ function OrderHistoryItem({
   const tipsByWorker = resolveWorkerTipEarnings(order);
   const orderEarningsByWorker = resolveWorkerOrderEarnings(order);
   const transferFeesByWorker = order.transfer_fees_by_worker ?? {};
-  const totalTransferFee = totalEarningsMap(transferFeesByWorker);
+  const transferFeeWorkerId = order.transfer_fee_worker_id ??
+    Object.entries(transferFeesByWorker).find(([, amount]) => amount > 0)?.[0] ??
+    null;
+  const transferFee = transferFeeWorkerId
+    ? transferFeesByWorker[transferFeeWorkerId] ?? 0
+    : 0;
+  const transferLog = [...(order.reassignment_history ?? [])]
+    .reverse()
+    .find((entry) => entry.new_worker_id === transferFeeWorkerId);
   const totalTip = totalEarningsMap(tipsByWorker);
   const commissionText = order.pricing_snapshot.commission_mode === "by_tier"
     ? `档位抽成 1档 ${order.pricing_snapshot.tier_commission_rates["1档"]}% / 2档 ${order.pricing_snapshot.tier_commission_rates["2档"]}% / 3档 ${order.pricing_snapshot.tier_commission_rates["3档"]}% / 娱乐 ${order.pricing_snapshot.tier_commission_rates["娱乐陪玩"] ?? 0}%`
@@ -1584,7 +1614,15 @@ function OrderHistoryItem({
                   <span>基础价格</span><span className="text-right text-white/75">{formatMoney(order.base_price_snapshot)}</span>
                   <span>特殊需求加价</span><span className="text-right text-[#C4C3FF]">+{formatMoney(order.special_total)}</span>
                   <span>订单总价</span><span className="text-right font-medium text-white">{formatMoney(order.total_price)}</span>
-                  <span>转单费（工资属性）</span><span className="text-right text-[#5FE778]">+{formatMoney(totalTransferFee)}</span>
+                  {transferFeeWorkerId && transferFee > 0 ? (
+                    <>
+                      <span>转单费（工资属性）</span>
+                      <span className="text-right text-[#5FE778]">
+                        {workerName(workers, transferFeeWorkerId, order)}：+{formatMoney(transferFee)}
+                        {transferLog ? `（由${transferLog.old_worker_name}承担）` : ""}
+                      </span>
+                    </>
+                  ) : null}
                   <span>即时打赏</span><span className="text-right text-[#FFB65C]">+{formatMoney(totalTip)}</span>
                   <span>俱乐部实得</span><span className="text-right text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</span>
                 </div>
@@ -1620,14 +1658,20 @@ function OrderHistoryItem({
                     {order.final_worker_incomes.map((income) => {
                       const personalTip = tipsByWorker[income.workerId] ?? 0;
                       const baseIncome = orderEarningsByWorker[income.workerId] ?? 0;
-                      const transferFee = transferFeesByWorker[income.workerId] ?? 0;
-                      const orderShare = Math.max(0, baseIncome - transferFee);
+                      const personalTransferFee = income.workerId === transferFeeWorkerId
+                        ? transferFee
+                        : 0;
+                      const orderShare = Math.max(0, baseIncome - personalTransferFee);
                       return (
                         <div key={income.workerId} className="flex items-start justify-between gap-3 text-white/65">
                           <span>{workerName(workers, income.workerId, order)}</span>
                           <span className="text-right">
                             <span className="block font-medium text-[#5FE778]">{formatMoney(income.amount)}</span>
-                            <span className="mt-0.5 block text-[11px] text-white/30">订单份额 {formatMoney(orderShare)} + 转单费 {formatMoney(transferFee)} + 即时打赏 {formatMoney(personalTip)}</span>
+                            <span className="mt-0.5 block text-[11px] text-white/30">
+                              订单份额 {formatMoney(orderShare)}
+                              {personalTransferFee > 0 ? ` + 转单费 ${formatMoney(personalTransferFee)}` : ""}
+                              {` + 即时打赏 ${formatMoney(personalTip)}`}
+                            </span>
                           </span>
                         </div>
                       );

@@ -291,14 +291,18 @@ export function buildClubExportWorkbookData(
       .join("; ");
     const totalTip = Object.values(tipsByWorker).reduce((sum, amount) => sum + safeNumber(amount), 0);
     const transferFees = order.transfer_fees_by_worker ?? {};
-    const transferFeeDetails = Object.entries(transferFees)
-      .filter(([, amount]) => safeNumber(amount) > 0)
-      .map(([workerId, amount]) => `${resolveWorkerName(workerId, order)}:${displayMoney(amount)}`)
-      .join("; ");
-    const totalTransferFee = Object.values(transferFees).reduce(
-      (sum, amount) => sum + safeNumber(amount),
-      0,
-    );
+    const transferFeeWorkerId = order.transfer_fee_worker_id ??
+      Object.entries(transferFees).find(([, amount]) => safeNumber(amount) > 0)?.[0] ??
+      null;
+    const totalTransferFee = transferFeeWorkerId
+      ? safeNumber(transferFees[transferFeeWorkerId])
+      : 0;
+    const transferLog = [...(order.reassignment_history ?? [])]
+      .reverse()
+      .find((entry) => entry.new_worker_id === transferFeeWorkerId);
+    const transferFeeDetails = transferFeeWorkerId && totalTransferFee > 0
+      ? `${resolveWorkerName(transferFeeWorkerId, order)}:${displayMoney(totalTransferFee)}${transferLog ? `（由${transferLog.old_worker_name}承担）` : ""}`
+      : "";
     const reassignmentDetails = (order.reassignment_history ?? [])
       .map((entry) => `${formatExcelDateTime(entry.changed_at)} ${entry.old_worker_name} → ${entry.new_worker_name}，转单费 ${displayMoney(entry.transfer_fee)}`)
       .join("; ");
@@ -339,6 +343,7 @@ export function buildClubExportWorkbookData(
         "id", "menu_item_id", "assigned_worker_ids", "order_type", "hours",
         "hourly_rate_snapshot", "split_type", "status", "tip", "tips_by_worker",
         "worker_order_earnings", "worker_tip_earnings", "transfer_fees_by_worker",
+        "transfer_fee_worker_id",
         "reassignment_history", "final_club_income",
         "final_worker_incomes", "special_requirements",
         "base_price_snapshot", "special_total", "total_price", "order_original_total",

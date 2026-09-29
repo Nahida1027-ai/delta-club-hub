@@ -201,7 +201,7 @@ const cases = [
   {
     name: "换人验收样例: 168 元双人单且新打手转单费 20 元",
     result: calculateSettlementWithTransferFees(
-      snapshot(168, 0, [worker("C", 50, "1档"), worker("B", 50, "2档")], {
+      snapshot(168, 0, [worker("C", 50, "1档"), worker("A", 50, "1档")], {
         commissionMode: "by_tier",
         tierRates: { "1档": 25, "2档": 20, "3档": 15, "娱乐陪玩": 0 },
       }),
@@ -209,7 +209,7 @@ const cases = [
       168,
       { C: 20 },
     ),
-    expected: { club: 17.8, workers: [83, 67.2] },
+    expected: { club: 42, workers: [83, 63], externalTransferFee: 20 },
   },
 ];
 
@@ -221,15 +221,18 @@ for (const scenario of cases) {
     scenario.name,
   );
   const workerTotal = scenario.result.worker_incomes.reduce((sum, income) => sum + income.amount, 0);
+  const externalTransferFee = "externalTransferFee" in scenario.expected
+    ? scenario.expected.externalTransferFee ?? 0
+    : 0;
   assert.equal(
     Number((scenario.result.club_income + workerTotal).toFixed(2)),
-    scenario.result.total_pool,
-    `${scenario.name}: 金额必须守恒`,
+    Number((scenario.result.total_pool + externalTransferFee).toFixed(2)),
+    `${scenario.name}: 订单资金与独立转单费必须分别守恒`,
   );
 }
 
-const negativeClubIncome = calculateSettlementWithTransferFees(
-  snapshot(168, 0, [worker("C", 50, "1档"), worker("B", 50, "2档")], {
+const largeTransferFee = calculateSettlementWithTransferFees(
+  snapshot(168, 0, [worker("C", 50, "1档"), worker("A", 50, "1档")], {
     commissionMode: "by_tier",
     tierRates: { "1档": 25, "2档": 20, "3档": 15, "娱乐陪玩": 0 },
   }),
@@ -237,7 +240,12 @@ const negativeClubIncome = calculateSettlementWithTransferFees(
   168,
   { C: 50 },
 );
-assert.equal(negativeClubIncome.club_income, -12.2, "转单费超过原抽成时应允许俱乐部实得为负数");
+assert.equal(largeTransferFee.club_income, 42, "转单费不得扣减俱乐部抽成");
+assert.deepEqual(
+  largeTransferFee.worker_incomes.map((income) => income.amount),
+  [113, 63],
+  "转单费只能增加指定新打手的工资",
+);
 
 assert.throws(
   () =>

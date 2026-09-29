@@ -911,9 +911,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
           : entry,
       ),
     };
-    const transferFeesByWorker = { ...(order.transfer_fees_by_worker ?? {}) };
-    delete transferFeesByWorker[oldWorkerId];
-    transferFeesByWorker[replacement.id] = transferFee;
+    // 当前订单只允许一个转单费收款人，避免保留打手误吃到转单费。
+    const transferFeesByWorker = { [replacement.id]: transferFee };
     calculateSettlementWithTransferFees(
       pricingSnapshot,
       {},
@@ -930,6 +929,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       ...order,
       assigned_worker_ids: assignedWorkerIds,
       transfer_fees_by_worker: transferFeesByWorker,
+      transfer_fee_worker_id: replacement.id,
       reassignment_history: [
         ...(order.reassignment_history ?? []),
         {
@@ -1137,6 +1137,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       worker_order_earnings: {},
       worker_tip_earnings: {},
       transfer_fees_by_worker: {},
+      transfer_fee_worker_id: null,
       reassignment_history: [],
       final_club_income: null,
       final_worker_incomes: [],
@@ -1195,7 +1196,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
      * 3. equal：先把订单总价平分，每名打手实得 = 自己的 1/2 份额 ×
      *    (1 - 自己档位抽成率)；俱乐部抽成 = 订单总价 - 两人基础实得之和。
      * 4. worker_order_earnings = 每名打手的基础实得 + 其转单费，只进入工资结算周期；
-     *    转单费从俱乐部抽成中等额扣除，允许俱乐部实得为负数；
+     *    转单费是独立工资补偿，不扣减俱乐部抽成，也不扣减被换下打手账面收入；
      *    worker_tip_earnings = tips_by_worker，100% 即时到账且永不进入周期。
      * 5. final_worker_incomes 继续保存两者之和，供总收入和历史兼容展示。
      * 6. 168 元、1档 25%、2档 20% 的 equal 单：两人各分 84 元，
@@ -1207,11 +1208,22 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       tipsByWorker,
     );
     const totalTip = tipsByWorkerTotal(normalizedTipsByWorker);
+    const transferFeeWorkerId = order.transfer_fee_worker_id ??
+      Object.entries(order.transfer_fees_by_worker ?? {}).find(
+        ([, amount]) => amount > 0,
+      )?.[0] ??
+      null;
+    const effectiveTransferFees = transferFeeWorkerId
+      ? {
+          [transferFeeWorkerId]:
+            order.transfer_fees_by_worker?.[transferFeeWorkerId] ?? 0,
+        }
+      : {};
     const settlement = calculateSettlementWithTransferFees(
       order.pricing_snapshot,
       normalizedTipsByWorker,
       order.order_original_total,
-      order.transfer_fees_by_worker,
+      effectiveTransferFees,
     );
     const workerOrderEarnings = deriveWorkerOrderEarnings(
       settlement.worker_incomes,

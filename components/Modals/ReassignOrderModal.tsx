@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, ArrowRightLeft, Search, UserRound } from "lucide-react";
+import { ArrowRightLeft, Search, UserRound } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -169,9 +169,7 @@ export function ReassignOrderModal({
         {},
         order.order_original_total,
       );
-      const transferFees = { ...(order.transfer_fees_by_worker ?? {}) };
-      delete transferFees[oldWorker.id];
-      transferFees[selectedWorker.id] = transferFee;
+      const transferFees = { [selectedWorker.id]: transferFee };
       const finalPreview = calculateSettlementWithTransferFees(
         replacementSnapshot,
         {},
@@ -227,7 +225,7 @@ export function ReassignOrderModal({
             </span>
             <DialogTitle className="text-xl">手动更换打手</DialogTitle>
             <DialogDescription className="text-white/45">
-              选择接替人并设置工资属性的转单费，原订单价格与另一名打手保持不变。
+              选择接替人并设置工资属性的转单费，转单费只归新打手且不影响俱乐部抽成。
             </DialogDescription>
           </DialogHeader>
 
@@ -302,7 +300,7 @@ export function ReassignOrderModal({
                 <Input inputMode="decimal" value={transferFeeInput} onChange={(event) => setTransferFeeInput(event.target.value)} className={`${inputClass} pl-8`} aria-invalid={Boolean(feeError)} />
               </div>
               {feeError ? <p className="text-[12px] text-[#FF6961]">{feeError}</p> : null}
-              <p className="text-[12px] leading-5 text-white/38">转单费为工资属性，将进入新打手的结算周期，不计入即时打赏。</p>
+              <p className="text-[12px] leading-5 text-white/38">转单费由被换下打手承担，只进入新打手的工资周期；不扣减原打手账面收入，也不影响俱乐部抽成。</p>
             </label>
 
             <AnimatePresence mode="wait" initial={false}>
@@ -318,7 +316,7 @@ export function ReassignOrderModal({
                     <div className="p-3"><p className="text-[12px] text-white/35">订单份额</p><p className="mt-1 font-semibold text-white">{formatMoney(orderShare)}</p></div>
                     <div className="p-3"><p className="text-[12px] text-white/35">转单费</p><p className="mt-1 font-semibold text-[#5FE778]">+{formatMoney(transferFee)}</p></div>
                     <div className="p-3"><p className="text-[12px] text-white/35">新打手总收入</p><p className="mt-1 font-semibold text-[#64D2FF]">{formatMoney(replacementTotal)}</p></div>
-                    <div className="p-3"><p className="text-[12px] text-white/35">俱乐部实得</p><p className={`mt-1 font-semibold ${clubIncome < 0 ? "text-[#FF6961]" : "text-white"}`}>{formatMoney(clubIncome)}</p></div>
+                    <div className="p-3"><p className="text-[12px] text-white/35">俱乐部实得</p><p className="mt-1 font-semibold text-white">{formatMoney(clubIncome)}</p></div>
                   </div>
                   <div className="space-y-2 p-4 text-sm">
                     <p className="flex justify-between gap-3 text-white/52"><span>被换下打手 · {oldWorker.name}</span><span className="text-[#FF8A84]">¥0.00</span></p>
@@ -327,11 +325,6 @@ export function ReassignOrderModal({
                       return <p key={income.workerId} className="flex justify-between gap-3 text-white/52"><span>保留打手 · {retained?.name ?? income.workerId}</span><span className="text-white/80">{formatMoney(income.amount)}</span></p>;
                     })}
                   </div>
-                  {clubIncome < 0 ? (
-                    <p className="flex items-center gap-2 border-t border-[#FF3B30]/15 bg-[#FF3B30]/[0.08] px-4 py-3 text-[12px] text-[#FF9A94]">
-                      <AlertTriangle className="size-4 shrink-0" />转单费已超过俱乐部原抽成，本单俱乐部实得将为负数。
-                    </p>
-                  ) : null}
                 </motion.section>
               ) : null}
             </AnimatePresence>

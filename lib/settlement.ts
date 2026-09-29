@@ -33,16 +33,6 @@ export function toCents(value: number): number {
   return cents;
 }
 
-/** 仅用于俱乐部实得等允许为负的结果金额，输入项本身仍应使用 toCents 校验。 */
-export function toSignedCents(value: number): number {
-  if (!Number.isFinite(value)) throw new Error("金额必须是有效数字");
-  const cents = Math.round((value + Math.sign(value) * Number.EPSILON) * 100);
-  if (!Number.isSafeInteger(cents) || Math.abs(cents) > MAX_MONEY_CENTS) {
-    throw new Error("金额超出安全范围");
-  }
-  return cents;
-}
-
 export function fromCents(cents: number): number {
   return Number((cents / 100).toFixed(2));
 }
@@ -443,8 +433,10 @@ export function calculateSettlement(
 }
 
 /**
- * 转单费属于工资：直接加到对应新打手工资，并从俱乐部抽成中等额扣除。
- * 因此：俱乐部实得 = 原抽成 - 转单费合计；打手工资池 = 原工资池 + 转单费合计。
+ * 转单费属于新打手工资，但独立于订单价款与俱乐部抽成：
+ * - 新打手工资 = 原订单份额 + 转单费；
+ * - 俱乐部实得始终沿用原订单抽成，不扣减转单费；
+ * - 被换下打手的既有账面收入不做任何扣减。
  * 转单费不属于打赏，也不会写入 worker_tip_earnings。
  */
 export function calculateSettlementWithTransferFees(
@@ -475,11 +467,8 @@ export function calculateSettlementWithTransferFees(
   if (!Number.isSafeInteger(transferFeeCents) || transferFeeCents > MAX_MONEY_CENTS) {
     throw new Error("转单费合计超出安全范围");
   }
-  const clubIncomeCents = toSignedCents(base.club_income) - transferFeeCents;
   const workerPoolCents = toCents(base.worker_pool) + transferFeeCents;
   if (
-    !Number.isSafeInteger(clubIncomeCents) ||
-    Math.abs(clubIncomeCents) > MAX_MONEY_CENTS ||
     !Number.isSafeInteger(workerPoolCents) ||
     workerPoolCents > MAX_MONEY_CENTS
   ) {
@@ -488,7 +477,8 @@ export function calculateSettlementWithTransferFees(
 
   return {
     ...base,
-    club_income: fromCents(clubIncomeCents),
+    // 转单费是独立工资补偿，不改变订单本身计算出的俱乐部抽成。
+    club_income: base.club_income,
     worker_pool: fromCents(workerPoolCents),
     worker_incomes: base.worker_incomes.map((income) => ({
       ...income,

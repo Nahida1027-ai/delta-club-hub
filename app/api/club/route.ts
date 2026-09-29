@@ -51,7 +51,6 @@ import {
   specialRequirementsTotal,
   tipsByWorkerTotal,
   toCents,
-  toSignedCents,
   validateMenuRule,
 } from "@/lib/settlement";
 import { getDescendantFolderIds, isDescendant } from "@/lib/folder-tree";
@@ -117,6 +116,7 @@ interface OrderRow {
   worker_order_earnings_json: string;
   worker_tip_earnings_json: string;
   transfer_fees_by_worker_json: string;
+  transfer_fee_worker_id: string | null;
   reassignment_history_json: string;
   final_club_income_cents: number | null;
   final_worker_incomes_json: string;
@@ -165,7 +165,7 @@ interface SettlementRecordRow {
 const WORKER_SELECT =
   "SELECT id, name, gender, tier, worker_type, sort_order, status, total_completed_orders, total_tip_earnings_cents, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id FROM workers";
 const ORDER_SELECT =
-  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, worker_order_earnings_json, worker_tip_earnings_json, transfer_fees_by_worker_json, reassignment_history_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
+  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, worker_order_earnings_json, worker_tip_earnings_json, transfer_fees_by_worker_json, transfer_fee_worker_id, reassignment_history_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
 const SETTLEMENT_PERIOD_SELECT =
   "SELECT id, worker_id, started_at, ended_at, status, settlement_record_id FROM settlement_periods";
 const SETTLEMENT_RECORD_SELECT =
@@ -474,6 +474,12 @@ function orderFromRow(row: OrderRow): Order {
   const workerOrderEarnings = Object.keys(storedOrderEarnings).length
     ? storedOrderEarnings
     : deriveWorkerOrderEarnings(finalWorkerIncomes, workerTipEarnings);
+  const transferFeesByWorker = parseStoredWorkerEarnings(
+    row.transfer_fees_by_worker_json,
+  );
+  const inferredTransferFeeWorkerId = Object.entries(transferFeesByWorker).find(
+    ([, amount]) => amount > 0,
+  )?.[0] ?? null;
   return {
     id: row.id,
     menu_item_id: row.menu_item_id,
@@ -493,9 +499,9 @@ function orderFromRow(row: OrderRow): Order {
     tips_by_worker: tipsByWorker,
     worker_order_earnings: workerOrderEarnings,
     worker_tip_earnings: workerTipEarnings,
-    transfer_fees_by_worker: parseStoredWorkerEarnings(
-      row.transfer_fees_by_worker_json,
-    ),
+    transfer_fees_by_worker: transferFeesByWorker,
+    transfer_fee_worker_id:
+      row.transfer_fee_worker_id ?? inferredTransferFeeWorkerId,
     reassignment_history: parseReassignmentHistory(row.reassignment_history_json),
     final_club_income:
       row.final_club_income_cents === null
@@ -1972,13 +1978,13 @@ export async function POST(request: Request) {
             : entry,
         ),
       };
-      const transferFeesByWorker = parseStoredWorkerEarnings(
-        row.transfer_fees_by_worker_json,
-      );
-      delete transferFeesByWorker[oldWorkerId];
-      transferFeesByWorker[replacement.id] = transferFee;
+      // 每张订单仅保留一个当前转单费归属人；历史换人轨迹另存日志。
+      const transferFeesByWorker: WorkerEarningsByWorker = {
+        [replacement.id]: transferFee,
+      };
       // 换人后继续沿用原订单冻结价格。新打手的订单份额按其档位重新计算，
-      // 转单费作为工资直接加给新打手，并从俱乐部抽成中等额扣除；负抽成允许保留。
+      // 转单费作为独立工资直接加给新打手，但不参与订单抽成计算；
+      // 俱乐部仍按新打手与保留打手的订单份额计算抽成，被换下打手账面不扣款。
       calculateSettlementWithTransferFees(
         newSnapshot,
         {},
@@ -2011,11 +2017,12 @@ export async function POST(request: Request) {
       try {
         const [orderResult, replacementResult, oldWorkerResult] = await db.batch([
           db
-            .prepare("UPDATE orders SET assigned_worker_ids_json = ?, pricing_snapshot_json = ?, transfer_fees_by_worker_json = ?, reassignment_history_json = ?, settlement_period_id = ?, settlement_period_ids_by_worker_json = ? WHERE id = ? AND status = 'active' AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
+            .prepare("UPDATE orders SET assigned_worker_ids_json = ?, pricing_snapshot_json = ?, transfer_fees_by_worker_json = ?, transfer_fee_worker_id = ?, reassignment_history_json = ?, settlement_period_id = ?, settlement_period_ids_by_worker_json = ? WHERE id = ? AND status = 'active' AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
             .bind(
               JSON.stringify(newAssignedWorkerIds),
               JSON.stringify(newSnapshot),
               JSON.stringify(transferFeesByWorker),
+              replacement.id,
               JSON.stringify(reassignmentHistory),
               settlementPeriodIdsByWorker[newAssignedWorkerIds[0]] ?? null,
               JSON.stringify(settlementPeriodIdsByWorker),
@@ -2291,16 +2298,22 @@ export async function POST(request: Request) {
        * 3. equal：每人先分订单总价的 1/2，再分别扣除自己档位对应的抽成；
        *    俱乐部实得 = 订单总价 - A 基础实得 - B 基础实得。
        * 4. worker_order_earnings = 每名打手的基础实得 + 其转单费，只进入工资结算周期；
-       *    转单费从俱乐部抽成中等额扣除，允许俱乐部实得为负数；
+       *    转单费是独立工资补偿，不扣减俱乐部抽成，也不扣减被换下打手账面收入；
        *    worker_tip_earnings = tips_by_worker，100% 即时到账且不进入周期。
        * 5. final_worker_incomes 保存订单工资 + 即时打赏，供总收入与历史兼容展示。
        * 6. 样例：168 元 equal 单，1档 25%、2档 20%，两人各自基数为 84 元，
        *    基础实得 63 元和 67.2 元；若仅给 1档打手 10 元打赏，最终实得
        *    73 元和 67.2 元，俱乐部仍实得 37.8 元。
        */
-      const transferFeesByWorker = parseStoredWorkerEarnings(
+      const storedTransferFees = parseStoredWorkerEarnings(
         row.transfer_fees_by_worker_json,
       );
+      const transferFeeWorkerId = row.transfer_fee_worker_id ??
+        Object.entries(storedTransferFees).find(([, amount]) => amount > 0)?.[0] ??
+        null;
+      const transferFeesByWorker: WorkerEarningsByWorker = transferFeeWorkerId
+        ? { [transferFeeWorkerId]: storedTransferFees[transferFeeWorkerId] ?? 0 }
+        : {};
       const settlement = calculateSettlementWithTransferFees(
         snapshot,
         tipsByWorker,
@@ -2321,7 +2334,7 @@ export async function POST(request: Request) {
           JSON.stringify(tipsByWorker),
           JSON.stringify(workerOrderEarnings),
           JSON.stringify(workerTipEarnings),
-          toSignedCents(settlement.club_income),
+          toCents(settlement.club_income),
           JSON.stringify(settlement.worker_incomes),
           completedAt,
           settlementToken,

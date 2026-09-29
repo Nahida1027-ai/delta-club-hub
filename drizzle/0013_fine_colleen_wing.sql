@@ -1,0 +1,1 @@
+ALTER TABLE `orders` ADD `transfer_fee_worker_id` text;

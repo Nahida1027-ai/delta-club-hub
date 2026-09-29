@@ -159,6 +159,8 @@ export interface Order {
   worker_tip_earnings: WorkerEarningsByWorker;
   /** 当前参与打手对应的转单费；属于工资并在订单完结后进入结算周期。 */
   transfer_fees_by_worker: WorkerEarningsByWorker;
+  /** 当前转单费唯一归属的打手 ID；旧数据可由 transfer_fees_by_worker 推断。 */
+  transfer_fee_worker_id: string | null;
   /** 换人追溯记录；旧订单缺失时按空数组读取。 */
   reassignment_history: ReassignmentLog[];
   final_club_income: number | null;

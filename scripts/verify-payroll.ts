@@ -66,6 +66,7 @@ const completedOrder: Order = {
   worker_order_earnings: { "worker-a": 63, "worker-b": 67.2 },
   worker_tip_earnings: { "worker-a": 10, "worker-b": 0 },
   transfer_fees_by_worker: {},
+  transfer_fee_worker_id: null,
   reassignment_history: [],
   final_club_income: 37.8,
   final_worker_incomes: [

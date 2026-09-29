@@ -69,6 +69,7 @@ export const orders = sqliteTable(
     workerOrderEarningsJson: text("worker_order_earnings_json").notNull().default("{}"),
     workerTipEarningsJson: text("worker_tip_earnings_json").notNull().default("{}"),
     transferFeesByWorkerJson: text("transfer_fees_by_worker_json").notNull().default("{}"),
+    transferFeeWorkerId: text("transfer_fee_worker_id"),
     reassignmentHistoryJson: text("reassignment_history_json").notNull().default("[]"),
     finalClubIncomeCents: integer("final_club_income_cents"),
     finalWorkerIncomesJson: text("final_worker_incomes_json").notNull().default("[]"),
