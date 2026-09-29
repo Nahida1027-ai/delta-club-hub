@@ -127,6 +127,15 @@ export type TipsByWorker = Record<string, number>;
 
 export type WorkerEarningsByWorker = Record<string, number>;
 
+export interface ReassignmentLog {
+  changed_at: string;
+  old_worker_id: string;
+  old_worker_name: string;
+  new_worker_id: string;
+  new_worker_name: string;
+  transfer_fee: number;
+}
+
 export interface Order {
   id: string;
   menu_item_id: string;
@@ -148,6 +157,10 @@ export interface Order {
   worker_order_earnings: WorkerEarningsByWorker;
   /** 每名打手即时到账的打赏，不进入工资结算周期。 */
   worker_tip_earnings: WorkerEarningsByWorker;
+  /** 当前参与打手对应的转单费；属于工资并在订单完结后进入结算周期。 */
+  transfer_fees_by_worker: WorkerEarningsByWorker;
+  /** 换人追溯记录；旧订单缺失时按空数组读取。 */
+  reassignment_history: ReassignmentLog[];
   final_club_income: number | null;
   /** 兼容旧界面与汇总：订单工资 + 即时打赏。 */
   final_worker_incomes: WorkerIncome[];

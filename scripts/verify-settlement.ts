@@ -12,6 +12,7 @@ import type {
 import {
   calculateOrderBasePrice,
   calculateSettlement,
+  calculateSettlementWithTransferFees,
   normalizeCompanionHours,
   normalizeSpecialRequirements,
   resolveOrderTipsByWorker,
@@ -197,6 +198,19 @@ const cases = [
     ),
     expected: { club: 51.75, workers: [86.25, 92] },
   },
+  {
+    name: "换人验收样例: 168 元双人单且新打手转单费 20 元",
+    result: calculateSettlementWithTransferFees(
+      snapshot(168, 0, [worker("C", 50, "1档"), worker("B", 50, "2档")], {
+        commissionMode: "by_tier",
+        tierRates: { "1档": 25, "2档": 20, "3档": 15, "娱乐陪玩": 0 },
+      }),
+      {},
+      168,
+      { C: 20 },
+    ),
+    expected: { club: 17.8, workers: [83, 67.2] },
+  },
 ];
 
 for (const scenario of cases) {
@@ -213,6 +227,17 @@ for (const scenario of cases) {
     `${scenario.name}: 金额必须守恒`,
   );
 }
+
+const negativeClubIncome = calculateSettlementWithTransferFees(
+  snapshot(168, 0, [worker("C", 50, "1档"), worker("B", 50, "2档")], {
+    commissionMode: "by_tier",
+    tierRates: { "1档": 25, "2档": 20, "3档": 15, "娱乐陪玩": 0 },
+  }),
+  {},
+  168,
+  { C: 50 },
+);
+assert.equal(negativeClubIncome.club_income, -12.2, "转单费超过原抽成时应允许俱乐部实得为负数");
 
 assert.throws(
   () =>

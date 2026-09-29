@@ -51,6 +51,7 @@ import { AddServiceModal } from "@/components/Modals/AddServiceModal";
 import { AddWorkerModal } from "@/components/Modals/AddWorkerModal";
 import { EditServiceModal } from "@/components/Modals/EditServiceModal";
 import { OrderConfirmModal } from "@/components/Modals/OrderConfirmModal";
+import { ReassignOrderModal } from "@/components/Modals/ReassignOrderModal";
 import { SortableHandle, SortableList } from "@/components/dnd/SortableList";
 import { ExportDataButton } from "@/components/exports/ExportDataButton";
 import { ServiceFolderBoard } from "@/components/folders/ServiceFolderBoard";
@@ -106,7 +107,7 @@ import type {
   WorkerType,
 } from "@/lib/club-types";
 import {
-  calculateSettlement,
+  calculateSettlementWithTransferFees,
   normalizeOrderType,
   orderTypeLabel,
   splitLabel,
@@ -683,14 +684,13 @@ function OrderDesk({
   );
 }
 
-function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }) {
+function WorkerBoard({ workers, orders, menu }: { workers: Worker[]; orders: Order[]; menu: PriceMenuItem[] }) {
   const [adding, setAdding] = useState(false);
   const [finishing, setFinishing] = useState<Order | null>(null);
   const [editing, setEditing] = useState<Worker | null>(null);
   const [deleting, setDeleting] = useState<Worker | null>(null);
   const [reassigning, setReassigning] = useState<{ order: Order; worker: Worker } | null>(null);
   const deleteWorker = useClubStore((state) => state.deleteWorker);
-  const cancelAndReassign = useClubStore((state) => state.cancelAndReassign);
   const reorderWorkers = useClubStore((state) => state.reorderWorkers);
   const settlementRecords = useClubStore((state) => state.settlementRecords);
   const isMutating = useClubStore((state) => state.is_mutating);
@@ -723,21 +723,6 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
       setDeleting(null);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除失败");
-    }
-  }
-
-  async function confirmReassignment() {
-    if (!reassigning) return;
-    try {
-      const previousName = reassigning.worker.name;
-      const result = await cancelAndReassign(
-        reassigning.order.id,
-        reassigning.worker.id,
-      );
-      toast.success(`${previousName} 已释放，新订单已派给 ${result.newWorkerName}`);
-      setReassigning(null);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "换人失败");
     }
   }
 
@@ -877,7 +862,7 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                       <div className="rounded-xl border border-[#FF453A]/15 bg-[#FF453A]/[0.055] p-3">
                         <p className="truncate text-sm font-medium text-white/85">{activeOrder.pricing_snapshot.service_name}</p>
                         <p className="mt-1 text-[12px] text-white/35">订单 #{activeOrder.id.slice(0, 8)}</p>
-                        {activeOrder.order_type === "companion" || activeOrder.special_requirements.length ? (
+                        {activeOrder.order_type === "companion" || activeOrder.special_requirements.length || totalEarningsMap(activeOrder.transfer_fees_by_worker ?? {}) > 0 ? (
                           <div className="mt-2 flex flex-wrap gap-1.5">
                             {activeOrder.order_type === "companion" ? (
                               <span className="rounded-md bg-[#30D158]/15 px-2 py-1 text-[11px] text-[#7EF29A]">
@@ -893,6 +878,11 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
                                   +{formatMoney(activeOrder.special_total)}
                                 </span>
                               </>
+                            ) : null}
+                            {totalEarningsMap(activeOrder.transfer_fees_by_worker ?? {}) > 0 ? (
+                              <span className="rounded-md bg-[#30D158]/15 px-2 py-1 text-[11px] text-[#7EF29A]">
+                                转单费 +{formatMoney(totalEarningsMap(activeOrder.transfer_fees_by_worker ?? {}))}
+                              </span>
                             ) : null}
                           </div>
                         ) : null}
@@ -949,15 +939,14 @@ function WorkerBoard({ workers, orders }: { workers: Worker[]; orders: Order[] }
         onOpenChange={(open) => !open && setDeleting(null)}
         onConfirm={confirmDeleteWorker}
       />
-      <DangerConfirmDialog
+      <ReassignOrderModal
+        key={reassigning ? `${reassigning.order.id}:${reassigning.worker.id}` : "closed"}
+        order={reassigning?.order ?? null}
+        oldWorker={reassigning?.worker ?? null}
+        menuItem={reassigning ? menu.find((item) => item.id === reassigning.order.menu_item_id) ?? null : null}
+        workers={workers}
         open={Boolean(reassigning)}
-        title="老板申请换人"
-        description="确定取消该打手的当前订单并重新指派吗？该打手将不计业绩且无收入。若没有符合规则的空闲打手，原订单会保持不变。"
-        confirmLabel="确认换人"
-        icon={RefreshCw}
-        isMutating={isMutating}
         onOpenChange={(open) => !open && setReassigning(null)}
-        onConfirm={confirmReassignment}
       />
     </div>
   );
@@ -1242,10 +1231,11 @@ function FinishOrderDialog({
       throw new Error("请检查每名打手的打赏金额");
     }
     totalTip = tipsByWorkerTotal(tipsByWorker);
-    preview = calculateSettlement(
+    preview = calculateSettlementWithTransferFees(
       order.pricing_snapshot,
       tipsByWorker,
       order.order_original_total,
+      order.transfer_fees_by_worker,
     );
     previewOrderEarnings = deriveWorkerOrderEarnings(
       preview.worker_incomes,
@@ -1368,12 +1358,14 @@ function FinishOrderDialog({
                 const income = preview?.worker_incomes.find((item) => item.workerId === weight.workerId);
                 const personalTip = tipsByWorker[weight.workerId] ?? 0;
                 const baseIncome = income ? previewOrderEarnings[weight.workerId] ?? 0 : null;
+                const transferFee = order.transfer_fees_by_worker?.[weight.workerId] ?? 0;
+                const orderShare = baseIncome === null ? null : Math.max(0, baseIncome - transferFee);
                 return (
                   <div key={weight.workerId} className="flex items-center justify-between gap-4 px-4 py-3 text-sm">
                     <span className="flex items-center gap-2 text-white/60">{workerName(workers, weight.workerId, order)}<TierBadge tier={weight.tier} /></span>
                     <span className="text-right">
                       <span className="block font-semibold text-white">{income ? formatMoney(income.amount) : "—"}</span>
-                      <span className="mt-0.5 block text-[11px] text-white/32">{baseIncome === null ? "—" : `订单工资 ${formatMoney(baseIncome)} + 即时打赏 ${formatMoney(personalTip)}`}</span>
+                      <span className="mt-0.5 block text-[11px] text-white/32">{baseIncome === null || orderShare === null ? "—" : `订单份额 ${formatMoney(orderShare)} + 转单费 ${formatMoney(transferFee)} + 即时打赏 ${formatMoney(personalTip)}`}</span>
                     </span>
                   </div>
                 );
@@ -1529,6 +1521,8 @@ function OrderHistoryItem({
   const orderType = normalizeOrderType(order.order_type ?? order.pricing_snapshot.order_type);
   const tipsByWorker = resolveWorkerTipEarnings(order);
   const orderEarningsByWorker = resolveWorkerOrderEarnings(order);
+  const transferFeesByWorker = order.transfer_fees_by_worker ?? {};
+  const totalTransferFee = totalEarningsMap(transferFeesByWorker);
   const totalTip = totalEarningsMap(tipsByWorker);
   const commissionText = order.pricing_snapshot.commission_mode === "by_tier"
     ? `档位抽成 1档 ${order.pricing_snapshot.tier_commission_rates["1档"]}% / 2档 ${order.pricing_snapshot.tier_commission_rates["2档"]}% / 3档 ${order.pricing_snapshot.tier_commission_rates["3档"]}% / 娱乐 ${order.pricing_snapshot.tier_commission_rates["娱乐陪玩"] ?? 0}%`
@@ -1590,6 +1584,7 @@ function OrderHistoryItem({
                   <span>基础价格</span><span className="text-right text-white/75">{formatMoney(order.base_price_snapshot)}</span>
                   <span>特殊需求加价</span><span className="text-right text-[#C4C3FF]">+{formatMoney(order.special_total)}</span>
                   <span>订单总价</span><span className="text-right font-medium text-white">{formatMoney(order.total_price)}</span>
+                  <span>转单费（工资属性）</span><span className="text-right text-[#5FE778]">+{formatMoney(totalTransferFee)}</span>
                   <span>即时打赏</span><span className="text-right text-[#FFB65C]">+{formatMoney(totalTip)}</span>
                   <span>俱乐部实得</span><span className="text-right text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</span>
                 </div>
@@ -1625,12 +1620,14 @@ function OrderHistoryItem({
                     {order.final_worker_incomes.map((income) => {
                       const personalTip = tipsByWorker[income.workerId] ?? 0;
                       const baseIncome = orderEarningsByWorker[income.workerId] ?? 0;
+                      const transferFee = transferFeesByWorker[income.workerId] ?? 0;
+                      const orderShare = Math.max(0, baseIncome - transferFee);
                       return (
                         <div key={income.workerId} className="flex items-start justify-between gap-3 text-white/65">
                           <span>{workerName(workers, income.workerId, order)}</span>
                           <span className="text-right">
                             <span className="block font-medium text-[#5FE778]">{formatMoney(income.amount)}</span>
-                            <span className="mt-0.5 block text-[11px] text-white/30">订单工资 {formatMoney(baseIncome)} + 即时打赏 {formatMoney(personalTip)}</span>
+                            <span className="mt-0.5 block text-[11px] text-white/30">订单份额 {formatMoney(orderShare)} + 转单费 {formatMoney(transferFee)} + 即时打赏 {formatMoney(personalTip)}</span>
                           </span>
                         </div>
                       );
@@ -1860,7 +1857,7 @@ export function ClubHub() {
 
         <TabsContent value="dashboard" className="pt-8"><Dashboard workers={workers} orders={orders} selectedMonth={selectedMonth} onMonthChange={setSelectedMonth} /></TabsContent>
         <TabsContent value="orders" className="pt-8"><OrderDesk menu={menu} folders={folders} workers={workers} orders={orders} /></TabsContent>
-        <TabsContent value="workers" className="pt-8"><WorkerBoard workers={workers} orders={orders} /></TabsContent>
+        <TabsContent value="workers" className="pt-8"><WorkerBoard workers={workers} orders={orders} menu={menu} /></TabsContent>
         <TabsContent value="pricing" className="pt-8"><PriceMenuPanel menu={menu} folders={folders} /></TabsContent>
         <TabsContent value="history" className="pt-8"><HistoryPanel workers={workers} orders={orders} selectedMonth={selectedMonth} onMonthChange={setSelectedMonth} /></TabsContent>
         <TabsContent value="payroll" className="pt-8"><PayrollSettlementPanel /></TabsContent>

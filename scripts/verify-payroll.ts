@@ -65,6 +65,8 @@ const completedOrder: Order = {
   tips_by_worker: { "worker-a": 10, "worker-b": 0 },
   worker_order_earnings: { "worker-a": 63, "worker-b": 67.2 },
   worker_tip_earnings: { "worker-a": 10, "worker-b": 0 },
+  transfer_fees_by_worker: {},
+  reassignment_history: [],
   final_club_income: 37.8,
   final_worker_incomes: [
     { workerId: "worker-a", amount: 73 },
@@ -167,6 +169,21 @@ assert.equal(
   ).length,
   0,
   "订单只能归入自己明确关联的周期",
+);
+
+assert.equal(
+  getOrdersForSettlementPeriod(
+    [{
+      ...unsettledAtBoundary,
+      id: "order-relinked-after-period-delete",
+      completed_at: new Date(start - 60_000).toISOString(),
+    }],
+    "worker-a",
+    periodA,
+    periodEnd,
+  ).length,
+  1,
+  "删除周期后重新挂入新周期的历史未结订单不能丢失工资",
 );
 
 const pendingRecord: SettlementRecord = {

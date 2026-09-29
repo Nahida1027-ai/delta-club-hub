@@ -29,6 +29,7 @@ import {
   buildPayoutWeights,
   calculateOrderBasePrice,
   calculateSettlement,
+  calculateSettlementWithTransferFees,
   defaultTierCommissionRates,
   fromCents,
   normalizeSpecialRequirements,
@@ -89,7 +90,12 @@ interface ClubStore extends ClubData {
   }) => Promise<void>;
   deleteWorker: (id: string) => Promise<void>;
   deleteHistoricalOrder: (orderId: string) => Promise<void>;
-  cancelAndReassign: (orderId: string, oldWorkerId: string) => Promise<ReassignmentResult>;
+  replaceWorkerWithFee: (
+    orderId: string,
+    oldWorkerId: string,
+    newWorkerId: string,
+    transferFee: number,
+  ) => Promise<ReassignmentResult>;
   updateMenuItem: (item: PriceMenuItem) => Promise<void>;
   deleteMenuItem: (menuItemId: string) => Promise<void>;
   reorderWorkers: (newOrder: string[]) => Promise<void>;
@@ -110,6 +116,7 @@ interface ClubStore extends ClubData {
   ensureActivePeriodForWorker: (workerId: string) => Promise<SettlementPeriod>;
   settleWorkerPeriod: (workerId: string, endedAt: number) => Promise<SettlementRecord>;
   deleteSettlementRecord: (settlementId: string) => Promise<void>;
+  deleteSettlementPeriod: (periodId: string) => Promise<void>;
   getOverdueSettlements: (fallbackHours?: number) => SettlementRecord[];
   markSettlementPaid: (settlementId: string, note?: string) => Promise<void>;
   updateSettlementNote: (settlementId: string, note: string) => Promise<void>;
@@ -135,52 +142,6 @@ function getSelectedWorkers(workers: Worker[], workerIds: string[]) {
   const selected = workerIds.map((id) => byId.get(id)).filter(Boolean) as Worker[];
   if (selected.length !== workerIds.length) throw new Error("所选打手不存在");
   return selected;
-}
-
-function findReplacementWorker(
-  data: ClubData,
-  order: Order,
-  oldWorkerId: string,
-) {
-  const oldWeight = order.pricing_snapshot.payout_weights.find(
-    (entry) => entry.workerId === oldWorkerId,
-  );
-  if (!oldWeight) throw new Error("该打手不属于当前订单");
-
-  const menuItem = data.menu.find((item) => item.id === order.menu_item_id);
-  if (!menuItem) return undefined;
-  const assignmentRule = {
-    commission_mode: order.pricing_snapshot.commission_mode,
-    split_type: order.pricing_snapshot.split_type,
-    eligible_tiers:
-      order.pricing_snapshot.split_type === "tiered" && oldWeight.tier
-        ? [oldWeight.tier]
-        : menuItem.eligible_tiers,
-  };
-
-  return data.workers.find((worker) => {
-    if (
-      worker.status !== "idle" ||
-      order.assigned_worker_ids.includes(worker.id) ||
-      !isWorkerEligibleForRule(assignmentRule, worker)
-    ) {
-      return false;
-    }
-    const replacementSnapshot: OrderPricingSnapshot = {
-      ...order.pricing_snapshot,
-      payout_weights: order.pricing_snapshot.payout_weights.map((entry) =>
-        entry.workerId === oldWorkerId
-          ? { ...entry, workerId: worker.id, workerName: worker.name, workerType: worker.workerType, tier: worker.tier }
-          : entry,
-      ),
-    };
-    try {
-      calculateSettlement(replacementSnapshot, {}, order.order_original_total);
-      return true;
-    } catch {
-      return false;
-    }
-  });
 }
 
 function decrementCompletionCounts(workers: Worker[], removedOrders: Order[]) {
@@ -897,7 +858,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 
-  cancelAndReassign: async (orderId, oldWorkerId) => {
+  replaceWorkerWithFee: async (orderId, oldWorkerId, newWorkerId, transferFeeValue) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
     const order = state.orders.find((candidate) => candidate.id === orderId);
@@ -907,69 +868,130 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     if (!order.assigned_worker_ids.includes(oldWorkerId)) {
       throw new Error("该打手不属于当前订单");
     }
+    const replacement = state.workers.find((worker) => worker.id === newWorkerId);
+    if (!replacement || replacement.status !== "idle") {
+      throw new Error("所选新打手当前不是空闲状态");
+    }
+    if (order.assigned_worker_ids.includes(replacement.id)) {
+      throw new Error("所选打手已经在本订单中");
+    }
+    const transferFee = fromCents(toCents(Number(transferFeeValue)));
+    const oldWeight = order.pricing_snapshot.payout_weights.find(
+      (entry) => entry.workerId === oldWorkerId,
+    );
+    if (!oldWeight) throw new Error("订单缺少该打手的分配权重");
+    const menuItem = state.menu.find((item) => item.id === order.menu_item_id);
+    if (!menuItem) throw new Error("服务项目不存在");
+    const assignmentRule = {
+      commission_mode: order.pricing_snapshot.commission_mode,
+      split_type: order.pricing_snapshot.split_type,
+      eligible_tiers:
+        order.pricing_snapshot.split_type === "tiered" && oldWeight.tier
+          ? [oldWeight.tier]
+          : menuItem.eligible_tiers,
+    };
+    if (!isWorkerEligibleForRule(assignmentRule, replacement)) {
+      throw new Error("所选新打手不符合该订单的档位或抽成规则");
+    }
 
-    const replacement = findReplacementWorker(state, order, oldWorkerId);
-    if (!replacement) throw new Error("当前无空闲打手可替换，请稍后再试");
-
-    const optimisticId = `reassigned-${Date.now()}`;
     const assignedWorkerIds = order.assigned_worker_ids.map((workerId) =>
       workerId === oldWorkerId ? replacement.id : workerId,
     );
+    const pricingSnapshot: OrderPricingSnapshot = {
+      ...order.pricing_snapshot,
+      payout_weights: order.pricing_snapshot.payout_weights.map((entry) =>
+        entry.workerId === oldWorkerId
+          ? {
+              ...entry,
+              workerId: replacement.id,
+              workerName: replacement.name,
+              workerType: replacement.workerType,
+              tier: replacement.tier,
+            }
+          : entry,
+      ),
+    };
+    const transferFeesByWorker = { ...(order.transfer_fees_by_worker ?? {}) };
+    delete transferFeesByWorker[oldWorkerId];
+    transferFeesByWorker[replacement.id] = transferFee;
+    calculateSettlementWithTransferFees(
+      pricingSnapshot,
+      {},
+      order.order_original_total,
+      transferFeesByWorker,
+    );
+
+    const changedAt = new Date().toISOString();
+    const optimisticPeriodId = replacement.active_period_id ?? `period-reassign-${Date.now()}`;
     const optimisticPeriodIds = { ...order.settlement_period_ids_by_worker };
     delete optimisticPeriodIds[oldWorkerId];
-    if (replacement.active_period_id) {
-      optimisticPeriodIds[replacement.id] = replacement.active_period_id;
-    }
+    optimisticPeriodIds[replacement.id] = optimisticPeriodId;
     const optimisticOrder: Order = {
       ...order,
-      id: optimisticId,
       assigned_worker_ids: assignedWorkerIds,
-      created_at: new Date().toISOString(),
+      transfer_fees_by_worker: transferFeesByWorker,
+      reassignment_history: [
+        ...(order.reassignment_history ?? []),
+        {
+          changed_at: changedAt,
+          old_worker_id: oldWorker.id,
+          old_worker_name: oldWorker.name,
+          new_worker_id: replacement.id,
+          new_worker_name: replacement.name,
+          transfer_fee: transferFee,
+        },
+      ],
       settled: false,
       settlement_id: null,
       settlement_ids_by_worker: {},
       settlement_period_id:
-        optimisticPeriodIds[assignedWorkerIds[0]] ?? replacement.active_period_id,
+        optimisticPeriodIds[assignedWorkerIds[0]] ?? null,
       settlement_period_ids_by_worker: optimisticPeriodIds,
-      pricing_snapshot: {
-        ...order.pricing_snapshot,
-        payout_weights: order.pricing_snapshot.payout_weights.map((entry) =>
-          entry.workerId === oldWorkerId
-            ? {
-                ...entry,
-                workerId: replacement.id,
-                workerName: replacement.name,
-                workerType: replacement.workerType,
-                tier: replacement.tier,
-              }
-            : entry,
-        ),
-      },
+      pricing_snapshot: pricingSnapshot,
     };
     const previous = clubSnapshot(state);
     set({
       workers: state.workers.map((worker) => {
         if (worker.id === oldWorkerId) return { ...worker, status: "idle" };
-        if (worker.id === replacement.id) return { ...worker, status: "busy" };
+        if (worker.id === replacement.id) {
+          return { ...worker, status: "busy", active_period_id: optimisticPeriodId };
+        }
         return worker;
       }),
-      orders: [optimisticOrder, ...state.orders.filter((candidate) => candidate.id !== orderId)],
+      settlementPeriods: replacement.active_period_id
+        ? state.settlementPeriods
+        : [
+            ...state.settlementPeriods,
+            {
+              id: optimisticPeriodId,
+              worker_id: replacement.id,
+              started_at: Date.parse(changedAt),
+              ended_at: null,
+              status: "active",
+              settlement_record_id: null,
+            },
+          ],
+      orders: state.orders.map((candidate) =>
+        candidate.id === orderId ? optimisticOrder : candidate,
+      ),
       is_mutating: true,
       error: null,
     });
 
     try {
       const result = await apiRequest({
-        action: "cancel_and_reassign",
+        action: "replace_worker_with_fee",
         order_id: orderId,
         old_worker_id: oldWorkerId,
+        new_worker_id: replacement.id,
+        transfer_fee: transferFee,
       });
       const newWorkerId = result.new_worker_id ?? replacement.id;
       const newWorkerName =
         result.workers.find((worker) => worker.id === newWorkerId)?.name ?? replacement.name;
       set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
       return {
-        orderId: result.new_order_id ?? optimisticId,
+        orderId: result.new_order_id ?? orderId,
         newWorkerId,
         newWorkerName,
       };
@@ -1114,6 +1136,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       tips_by_worker: {},
       worker_order_earnings: {},
       worker_tip_earnings: {},
+      transfer_fees_by_worker: {},
+      reassignment_history: [],
       final_club_income: null,
       final_worker_incomes: [],
       special_requirements: normalizedRequirements,
@@ -1170,7 +1194,8 @@ export const useClubStore = create<ClubStore>((set, get) => ({
      * 2. single：打手实得 = 订单总价 × (1 - 该打手档位抽成率)。
      * 3. equal：先把订单总价平分，每名打手实得 = 自己的 1/2 份额 ×
      *    (1 - 自己档位抽成率)；俱乐部抽成 = 订单总价 - 两人基础实得之和。
-     * 4. worker_order_earnings = 每名打手的基础实得，只进入工资结算周期；
+     * 4. worker_order_earnings = 每名打手的基础实得 + 其转单费，只进入工资结算周期；
+     *    转单费从俱乐部抽成中等额扣除，允许俱乐部实得为负数；
      *    worker_tip_earnings = tips_by_worker，100% 即时到账且永不进入周期。
      * 5. final_worker_incomes 继续保存两者之和，供总收入和历史兼容展示。
      * 6. 168 元、1档 25%、2档 20% 的 equal 单：两人各分 84 元，
@@ -1182,10 +1207,11 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       tipsByWorker,
     );
     const totalTip = tipsByWorkerTotal(normalizedTipsByWorker);
-    const settlement = calculateSettlement(
+    const settlement = calculateSettlementWithTransferFees(
       order.pricing_snapshot,
       normalizedTipsByWorker,
       order.order_original_total,
+      order.transfer_fees_by_worker,
     );
     const workerOrderEarnings = deriveWorkerOrderEarnings(
       settlement.worker_incomes,
@@ -1313,6 +1339,55 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       const data = await apiRequest({
         action: "delete_settlement_record",
         settlement_id: settlementId,
+      });
+      set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  deleteSettlementPeriod: async (periodId) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const period = state.settlementPeriods.find(
+      (candidate) => candidate.id === periodId && candidate.status === "active",
+    );
+    if (!period) throw new Error("只允许删除进行中的结算周期");
+    const previous = clubSnapshot(state);
+    set({
+      workers: state.workers.map((worker) =>
+        worker.id === period.worker_id && worker.active_period_id === periodId
+          ? { ...worker, active_period_id: null }
+          : worker,
+      ),
+      settlementPeriods: state.settlementPeriods.filter(
+        (candidate) => candidate.id !== periodId,
+      ),
+      orders: state.orders.map((order) => {
+        const mappedPeriodId = order.settlement_period_ids_by_worker?.[period.worker_id];
+        if (mappedPeriodId !== periodId && order.settlement_period_id !== periodId) {
+          return order;
+        }
+        const periodIds = { ...order.settlement_period_ids_by_worker };
+        delete periodIds[period.worker_id];
+        return {
+          ...order,
+          settled: false,
+          settlement_period_id:
+            order.settlement_period_id === periodId
+              ? null
+              : order.settlement_period_id,
+          settlement_period_ids_by_worker: periodIds,
+        };
+      }),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const data = await apiRequest({
+        action: "delete_settlement_period",
+        period_id: periodId,
       });
       set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
     } catch (error) {

@@ -52,6 +52,8 @@ export function calculateWorkerEarningForOrder(
 /**
  * 只收集明确归属于该打手当前周期、且在管理员指定结束时间内完成的订单。
  * 双人订单通过 settlement_period_ids_by_worker 分别关联两名打手的周期。
+ * 周期被删除后遗留的未结订单会在下一次接单创建新周期时重新挂入；此时订单
+ * 可能早于新周期展示起点，因此以显式周期关联为准，不再重复限制完成时间下界。
  */
 export function getOrdersForSettlementPeriod(
   orders: Order[],
@@ -66,7 +68,6 @@ export function getOrdersForSettlementPeriod(
     const completedAt = Date.parse(order.completed_at);
     return (
       Number.isFinite(completedAt) &&
-      completedAt >= period.started_at &&
       completedAt <= endedAt &&
       order.final_worker_incomes.some((income) => income.workerId === workerId)
     );

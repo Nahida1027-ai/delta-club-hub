@@ -151,12 +151,14 @@ function ActivePeriodCard({
   orders,
   now,
   onSettle,
+  onDelete,
 }: {
   worker: Worker;
   period: SettlementPeriod | null;
   orders: Order[];
   now: number;
   onSettle: (worker: Worker, period: SettlementPeriod) => void;
+  onDelete: (worker: Worker, period: SettlementPeriod) => void;
 }) {
   const isMutating = useClubStore((state) => state.is_mutating);
   const periodOrders = useMemo(
@@ -194,8 +196,15 @@ function ActivePeriodCard({
         </span>
       </div>
 
-      {period ? (
-        <>
+      <AnimatePresence mode="wait" initial={false}>
+        {period ? (
+        <motion.div
+          key={period.id}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, x: -20 }}
+          className="flex flex-1 flex-col"
+        >
           <div className="mt-5 space-y-2 text-sm">
             <p className="flex items-center justify-between gap-3 text-white/42">
               <span>周期开始</span>
@@ -225,22 +234,41 @@ function ActivePeriodCard({
               周期内打赏（已即时结算）：<span className="text-[#FFB65C]">{formatMoney(tipAmount)}</span>
             </p>
           ) : null}
-          <Button
-            disabled={isMutating}
-            onClick={() => onSettle(worker, period)}
-            className="mt-auto h-11 rounded-xl bg-[#007AFF] text-white shadow-[0_10px_28px_rgba(0,122,255,.22)] hover:bg-[#1685ff]"
-          >
-            <Banknote className="size-4" />立即结算
-          </Button>
-        </>
+          <p className="mt-auto pt-4 text-[12px] leading-5 text-white/32">删除周期后，该打手需接单后重新生成周期。</p>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <Button
+              variant="outline"
+              disabled={isMutating}
+              onClick={() => onDelete(worker, period)}
+              className="h-11 rounded-xl border-[#FF3B30]/25 bg-[#FF3B30]/10 text-[#FF6961] hover:bg-[#FF3B30]/20 hover:text-white"
+            >
+              <Trash2 className="size-4" />删除周期
+            </Button>
+            <Button
+              disabled={isMutating}
+              onClick={() => onSettle(worker, period)}
+              className="h-11 rounded-xl bg-[#007AFF] text-white shadow-[0_10px_28px_rgba(0,122,255,.22)] hover:bg-[#1685ff]"
+            >
+              <Banknote className="size-4" />立即结算
+            </Button>
+          </div>
+        </motion.div>
       ) : (
-        <div className="mt-5 flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 px-4 py-8 text-center">
+        <motion.div
+          key="empty-period"
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, x: -20 }}
+          className="mt-5 flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 px-4 py-8 text-center"
+        >
           <Clock3 className="mb-3 size-7 text-white/20" />
           <p className="text-sm leading-6 text-white/40">
             暂无进行中的结算周期<br />接单后自动创建
           </p>
-        </div>
+          <Button disabled className="mt-4 h-10 rounded-xl bg-white/[0.05] text-white/25">立即结算</Button>
+        </motion.div>
       )}
+      </AnimatePresence>
     </motion.article>
   );
 }
@@ -511,6 +539,7 @@ export function PayrollSettlementPanel() {
   const periods = useClubStore((state) => state.settlementPeriods);
   const records = useClubStore((state) => state.settlementRecords);
   const deleteSettlementRecord = useClubStore((state) => state.deleteSettlementRecord);
+  const deleteSettlementPeriod = useClubStore((state) => state.deleteSettlementPeriod);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [now, setNow] = useState(() => Date.now());
   const [tab, setTab] = useState("pending");
@@ -520,6 +549,10 @@ export function PayrollSettlementPanel() {
   const [viewing, setViewing] = useState<SettlementRecord | null>(null);
   const [settling, setSettling] = useState<{ worker: Worker; period: SettlementPeriod } | null>(null);
   const [deleting, setDeleting] = useState<SettlementRecord | null>(null);
+  const [deletingPeriod, setDeletingPeriod] = useState<{
+    worker: Worker;
+    period: SettlementPeriod;
+  } | null>(null);
   const overdueAnchor = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -584,6 +617,18 @@ export function PayrollSettlementPanel() {
     }
   }
 
+  async function confirmDeletePeriod() {
+    if (!deletingPeriod) return;
+    try {
+      const workerName = deletingPeriod.worker.name;
+      await deleteSettlementPeriod(deletingPeriod.period.id);
+      toast.success(`${workerName} 的当前结算周期已删除`);
+      setDeletingPeriod(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "结算周期删除失败");
+    }
+  }
+
   return (
     <div className="space-y-7">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -625,6 +670,7 @@ export function PayrollSettlementPanel() {
               orders={orders}
               now={now}
               onSettle={(targetWorker, period) => setSettling({ worker: targetWorker, period })}
+              onDelete={(targetWorker, period) => setDeletingPeriod({ worker: targetWorker, period })}
             />
           ))}
         </div>
@@ -660,6 +706,21 @@ export function PayrollSettlementPanel() {
 
       <SettlementConfirmDialog key={settling ? `${settling.worker.id}:${settling.period.id}` : "closed"} target={settling} orders={orders} now={now} open={Boolean(settling)} onOpenChange={(next) => !next && setSettling(null)} />
       <SettlementDetailDialog key={viewing?.id ?? "closed"} record={viewing} orders={orders} open={Boolean(viewing)} onOpenChange={(next) => !next && setViewing(null)} />
+      <AlertDialog open={Boolean(deletingPeriod)} onOpenChange={(next) => !next && !isMutating && setDeletingPeriod(null)}>
+        <AlertDialogContent className="border-white/10 bg-[#171719]/95 text-white shadow-2xl backdrop-blur-xl">
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={{ type: "spring", stiffness: 300, damping: 27 }}>
+            <AlertDialogHeader>
+              <AlertDialogMedia className="bg-[#FF3B30]/12 text-[#FF6961]"><Trash2 className="size-5" /></AlertDialogMedia>
+              <AlertDialogTitle>删除当前结算周期</AlertDialogTitle>
+              <AlertDialogDescription className="leading-6 text-white/45">确定要删除该打手的结算周期吗？删除后该打手的结算界面将重置为“暂无进行中的结算周期”，历史已结算记录不受影响，周期内未结算的订单将保持未结算状态。</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter className="mt-5">
+              <AlertDialogCancel disabled={isMutating} className="border-white/10 bg-white/[0.04] text-white/65 hover:bg-white/[0.08] hover:text-white">取消</AlertDialogCancel>
+              <AlertDialogAction disabled={isMutating} onClick={(event) => { event.preventDefault(); void confirmDeletePeriod(); }} className="bg-[#FF3B30] text-white hover:bg-[#FF453A]">{isMutating ? "正在删除…" : "确认删除周期"}</AlertDialogAction>
+            </AlertDialogFooter>
+          </motion.div>
+        </AlertDialogContent>
+      </AlertDialog>
       <AlertDialog open={Boolean(deleting)} onOpenChange={(next) => !next && !isMutating && setDeleting(null)}>
         <AlertDialogContent className="border-white/10 bg-[#171719]/95 text-white shadow-2xl backdrop-blur-xl">
           <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={{ type: "spring", stiffness: 300, damping: 27 }}>

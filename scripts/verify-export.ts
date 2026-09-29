@@ -72,6 +72,8 @@ const data: ClubData = {
       tips_by_worker: { "worker-a": 10, "worker-b": 0 },
       worker_order_earnings: { "worker-a": 86.25, "worker-b": 92 },
       worker_tip_earnings: { "worker-a": 10, "worker-b": 0 },
+      transfer_fees_by_worker: {},
+      reassignment_history: [],
       final_club_income: 51.75,
       final_worker_incomes: [
         { workerId: "worker-a", amount: 96.25 },
@@ -166,9 +168,10 @@ assert.equal(exportData.sheets[0].rows[0][8], 10, "打手即时打赏应独立�
 assert.equal(exportData.sheets[0].rows[0][9], 96.25, "打手累计总收入应包含即时打赏");
 assert.equal(exportData.sheets[1].rows[0][15], "热门推荐 / 高端代练", "应递归生成完整文件夹路径");
 assert.match(String(exportData.sheets[2].rows[0][14]), /甲打手:¥10\.00/, "应导出个人打赏明细");
-assert.match(String(exportData.sheets[2].rows[0][16]), /甲打手:¥86\.25/, "应导出进入周期的订单工资");
-assert.match(String(exportData.sheets[2].rows[0][17]), /甲打手:¥10\.00/, "应导出即时打赏收入");
-assert.match(String(exportData.sheets[2].rows[0][18]), /乙陪玩:¥92\.00/, "应保留每名打手最终收入");
+assert.equal(exportData.sheets[2].rows[0][17], 0, "无换人订单的转单费应为 0");
+assert.match(String(exportData.sheets[2].rows[0][19]), /甲打手:¥86\.25/, "应导出进入周期的订单工资");
+assert.match(String(exportData.sheets[2].rows[0][20]), /甲打手:¥10\.00/, "应导出即时打赏收入");
+assert.match(String(exportData.sheets[2].rows[0][21]), /乙陪玩:¥92\.00/, "应保留每名打手最终收入");
 assert.equal(exportData.summary.totalClubIncome, 51.75);
 assert.equal(exportData.summary.totalOrderWageExpense, 178.25);
 assert.equal(exportData.summary.totalTipExpense, 10);

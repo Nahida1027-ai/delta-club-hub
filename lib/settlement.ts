@@ -12,6 +12,7 @@ import type {
   TieredRatios,
   TipsByWorker,
   Worker,
+  WorkerEarningsByWorker,
   WorkerTier,
 } from "@/lib/club-types";
 
@@ -27,6 +28,16 @@ export function toCents(value: number): number {
   }
   const cents = Math.round((value + Number.EPSILON) * 100);
   if (!Number.isSafeInteger(cents) || cents > MAX_MONEY_CENTS) {
+    throw new Error("金额超出安全范围");
+  }
+  return cents;
+}
+
+/** 仅用于俱乐部实得等允许为负的结果金额，输入项本身仍应使用 toCents 校验。 */
+export function toSignedCents(value: number): number {
+  if (!Number.isFinite(value)) throw new Error("金额必须是有效数字");
+  const cents = Math.round((value + Math.sign(value) * Number.EPSILON) * 100);
+  if (!Number.isSafeInteger(cents) || Math.abs(cents) > MAX_MONEY_CENTS) {
     throw new Error("金额超出安全范围");
   }
   return cents;
@@ -427,6 +438,63 @@ export function calculateSettlement(
     worker_incomes: workerIncomes.map((entry) => ({
       workerId: entry.workerId,
       amount: fromCents(entry.cents),
+    })),
+  };
+}
+
+/**
+ * 转单费属于工资：直接加到对应新打手工资，并从俱乐部抽成中等额扣除。
+ * 因此：俱乐部实得 = 原抽成 - 转单费合计；打手工资池 = 原工资池 + 转单费合计。
+ * 转单费不属于打赏，也不会写入 worker_tip_earnings。
+ */
+export function calculateSettlementWithTransferFees(
+  snapshot: OrderPricingSnapshot,
+  tipsByWorker: TipsByWorker,
+  orderOriginalTotal: number,
+  transferFeesByWorker: WorkerEarningsByWorker = {},
+): SettlementResult {
+  const base = calculateSettlement(snapshot, tipsByWorker, orderOriginalTotal);
+  const workerIds = snapshot.payout_weights.map((entry) => entry.workerId);
+  const allowedWorkerIds = new Set(workerIds);
+  for (const workerId of Object.keys(transferFeesByWorker ?? {})) {
+    if (!allowedWorkerIds.has(workerId)) {
+      throw new Error("转单费只能归属于当前订单参与打手");
+    }
+  }
+
+  const normalizedFees = Object.fromEntries(
+    workerIds.map((workerId) => [
+      workerId,
+      fromCents(toCents(Number(transferFeesByWorker?.[workerId] ?? 0))),
+    ]),
+  ) as WorkerEarningsByWorker;
+  const transferFeeCents = Object.values(normalizedFees).reduce(
+    (sum, amount) => sum + toCents(amount),
+    0,
+  );
+  if (!Number.isSafeInteger(transferFeeCents) || transferFeeCents > MAX_MONEY_CENTS) {
+    throw new Error("转单费合计超出安全范围");
+  }
+  const clubIncomeCents = toSignedCents(base.club_income) - transferFeeCents;
+  const workerPoolCents = toCents(base.worker_pool) + transferFeeCents;
+  if (
+    !Number.isSafeInteger(clubIncomeCents) ||
+    Math.abs(clubIncomeCents) > MAX_MONEY_CENTS ||
+    !Number.isSafeInteger(workerPoolCents) ||
+    workerPoolCents > MAX_MONEY_CENTS
+  ) {
+    throw new Error("转单后的结算金额超出安全范围");
+  }
+
+  return {
+    ...base,
+    club_income: fromCents(clubIncomeCents),
+    worker_pool: fromCents(workerPoolCents),
+    worker_incomes: base.worker_incomes.map((income) => ({
+      ...income,
+      amount: fromCents(
+        toCents(income.amount) + toCents(normalizedFees[income.workerId] ?? 0),
+      ),
     })),
   };
 }

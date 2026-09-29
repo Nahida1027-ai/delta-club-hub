@@ -290,6 +290,18 @@ export function buildClubExportWorkbookData(
       .map(([workerId, amount]) => `${resolveWorkerName(workerId, order)}:${displayMoney(amount)}`)
       .join("; ");
     const totalTip = Object.values(tipsByWorker).reduce((sum, amount) => sum + safeNumber(amount), 0);
+    const transferFees = order.transfer_fees_by_worker ?? {};
+    const transferFeeDetails = Object.entries(transferFees)
+      .filter(([, amount]) => safeNumber(amount) > 0)
+      .map(([workerId, amount]) => `${resolveWorkerName(workerId, order)}:${displayMoney(amount)}`)
+      .join("; ");
+    const totalTransferFee = Object.values(transferFees).reduce(
+      (sum, amount) => sum + safeNumber(amount),
+      0,
+    );
+    const reassignmentDetails = (order.reassignment_history ?? [])
+      .map((entry) => `${formatExcelDateTime(entry.changed_at)} ${entry.old_worker_name} → ${entry.new_worker_name}，转单费 ${displayMoney(entry.transfer_fee)}`)
+      .join("; ");
     const orderType = normalizeOrderType(order.order_type);
     return [
       order.id,
@@ -308,6 +320,9 @@ export function buildClubExportWorkbookData(
       roundMoney(safeNumber(order.total_price, order.order_original_total)),
       tipDetails,
       roundMoney(totalTip),
+      transferFeeDetails,
+      roundMoney(totalTransferFee),
+      reassignmentDetails,
       orderIncomeDetails,
       tipIncomeDetails,
       incomeDetails,
@@ -323,7 +338,8 @@ export function buildClubExportWorkbookData(
       serializeExtraFields(order, [
         "id", "menu_item_id", "assigned_worker_ids", "order_type", "hours",
         "hourly_rate_snapshot", "split_type", "status", "tip", "tips_by_worker",
-        "worker_order_earnings", "worker_tip_earnings", "final_club_income",
+        "worker_order_earnings", "worker_tip_earnings", "transfer_fees_by_worker",
+        "reassignment_history", "final_club_income",
         "final_worker_incomes", "special_requirements",
         "base_price_snapshot", "special_total", "total_price", "order_original_total",
         "created_at", "completed_at", "pricing_snapshot", "settled", "settlement_id",
@@ -537,13 +553,14 @@ export function buildClubExportWorkbookData(
           "订单ID", "服务ID", "服务名称", "订单类型", "陪玩时长（小时）",
           "每小时价格快照", "下单时间", "完成时间", "订单状态", "涉及打手",
           "基础价格快照", "特殊需求明细", "特殊需求总加价", "订单总价", "打赏明细",
-          "总打赏", "各打手订单收入（进周期）", "各打手打赏收入（即时）",
+          "总打赏", "转单费明细（工资属性）", "转单费合计", "换人记录",
+          "各打手订单收入（进周期）", "各打手打赏收入（即时）",
           "各打手最终收入", "俱乐部抽成", "分配模式", "抽成规则快照",
           "分配权重快照", "是否已结算", "所属结算记录ID", "所属结算周期ID", "其他字段",
         ],
         rows: orderRows,
-        currencyColumns: [6, 11, 13, 14, 16, 20],
-        wrapColumns: [10, 12, 15, 17, 18, 19, 22, 23, 25, 26, 27],
+        currencyColumns: [6, 11, 13, 14, 16, 18, 23],
+        wrapColumns: [10, 12, 15, 17, 19, 20, 21, 22, 25, 26, 28, 29, 30],
       },
       {
         name: "结算记录",
