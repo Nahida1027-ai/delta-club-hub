@@ -290,19 +290,18 @@ export function buildClubExportWorkbookData(
       .map(([workerId, amount]) => `${resolveWorkerName(workerId, order)}:${displayMoney(amount)}`)
       .join("; ");
     const totalTip = Object.values(tipsByWorker).reduce((sum, amount) => sum + safeNumber(amount), 0);
-    const transferFees = order.transfer_fees_by_worker ?? {};
-    const transferFeeWorkerId = order.transfer_fee_worker_id ??
-      Object.entries(transferFees).find(([, amount]) => safeNumber(amount) > 0)?.[0] ??
-      null;
-    const totalTransferFee = transferFeeWorkerId
-      ? safeNumber(transferFees[transferFeeWorkerId])
-      : 0;
-    const transferLog = [...(order.reassignment_history ?? [])]
-      .reverse()
-      .find((entry) => entry.new_worker_id === transferFeeWorkerId);
-    const transferFeeDetails = transferFeeWorkerId && totalTransferFee > 0
-      ? `${resolveWorkerName(transferFeeWorkerId, order)}:${displayMoney(totalTransferFee)}${transferLog ? `（由${transferLog.old_worker_name}承担）` : ""}`
-      : "";
+    const transferFeeRecords = order.transfer_fees ?? [];
+    const totalTransferFee = transferFeeRecords.reduce(
+      (sum, record) => sum + safeNumber(record.fee),
+      0,
+    );
+    const transferFeeDetails = transferFeeRecords
+      .map(
+        (record) =>
+          `${record.to_worker_name_snapshot}:${displayMoney(record.fee)}` +
+          `（由${record.from_worker_name_snapshot}承担，${formatExcelDateTime(record.created_at)}）`,
+      )
+      .join("; ");
     const reassignmentDetails = (order.reassignment_history ?? [])
       .map((entry) => `${formatExcelDateTime(entry.changed_at)} ${entry.old_worker_name} → ${entry.new_worker_name}，转单费 ${displayMoney(entry.transfer_fee)}`)
       .join("; ");
@@ -343,7 +342,7 @@ export function buildClubExportWorkbookData(
         "id", "menu_item_id", "assigned_worker_ids", "order_type", "hours",
         "hourly_rate_snapshot", "split_type", "status", "tip", "tips_by_worker",
         "worker_order_earnings", "worker_tip_earnings", "transfer_fees_by_worker",
-        "transfer_fee_worker_id",
+        "transfer_fees",
         "reassignment_history", "final_club_income",
         "final_worker_incomes", "special_requirements",
         "base_price_snapshot", "special_total", "total_price", "order_original_total",
@@ -460,11 +459,14 @@ export function buildClubExportWorkbookData(
       const workerOrders = completedOrders.filter((order) =>
         (order.assigned_worker_ids ?? []).includes(worker.id),
       );
+      const wageOrders = completedOrders.filter(
+        (order) => safeNumber(resolveWorkerOrderEarnings(order)[worker.id]) > 0,
+      );
       return {
         id: worker.id,
         name: worker.name || worker.id,
         orders: workerOrders.length,
-        orderIncome: roundMoney(workerOrders.reduce(
+        orderIncome: roundMoney(wageOrders.reduce(
           (sum, order) => sum + safeNumber(resolveWorkerOrderEarnings(order)[worker.id]),
           0,
         )),

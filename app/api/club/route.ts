@@ -56,6 +56,10 @@ import {
 import { getDescendantFolderIds, isDescendant } from "@/lib/folder-tree";
 import { normalizeWorkerGender } from "@/lib/worker-profile";
 import {
+  aggregateTransferFees,
+  resolveTransferFeeRecords,
+} from "@/lib/transfer-fees";
+import {
   isWorkerEligibleForMenuItem,
   isWorkerEligibleForRule,
 } from "@/lib/worker-eligibility";
@@ -116,7 +120,7 @@ interface OrderRow {
   worker_order_earnings_json: string;
   worker_tip_earnings_json: string;
   transfer_fees_by_worker_json: string;
-  transfer_fee_worker_id: string | null;
+  transfer_fees_json: string;
   reassignment_history_json: string;
   final_club_income_cents: number | null;
   final_worker_incomes_json: string;
@@ -165,7 +169,7 @@ interface SettlementRecordRow {
 const WORKER_SELECT =
   "SELECT id, name, gender, tier, worker_type, sort_order, status, total_completed_orders, total_tip_earnings_cents, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id FROM workers";
 const ORDER_SELECT =
-  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, worker_order_earnings_json, worker_tip_earnings_json, transfer_fees_by_worker_json, transfer_fee_worker_id, reassignment_history_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
+  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, worker_order_earnings_json, worker_tip_earnings_json, transfer_fees_by_worker_json, transfer_fees_json, reassignment_history_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
 const SETTLEMENT_PERIOD_SELECT =
   "SELECT id, worker_id, started_at, ended_at, status, settlement_record_id FROM settlement_periods";
 const SETTLEMENT_RECORD_SELECT =
@@ -474,12 +478,18 @@ function orderFromRow(row: OrderRow): Order {
   const workerOrderEarnings = Object.keys(storedOrderEarnings).length
     ? storedOrderEarnings
     : deriveWorkerOrderEarnings(finalWorkerIncomes, workerTipEarnings);
-  const transferFeesByWorker = parseStoredWorkerEarnings(
+  const legacyTransferFeesByWorker = parseStoredWorkerEarnings(
     row.transfer_fees_by_worker_json,
   );
-  const inferredTransferFeeWorkerId = Object.entries(transferFeesByWorker).find(
-    ([, amount]) => amount > 0,
-  )?.[0] ?? null;
+  const reassignmentHistory = parseReassignmentHistory(row.reassignment_history_json);
+  const transferFees = resolveTransferFeeRecords({
+    orderId: row.id,
+    storedRecords: JSON.parse(row.transfer_fees_json || "[]"),
+    legacyTotals: legacyTransferFeesByWorker,
+    reassignmentHistory,
+    fallbackCreatedAt: Date.parse(row.created_at) || 0,
+  });
+  const transferFeesByWorker = aggregateTransferFees(transferFees);
   return {
     id: row.id,
     menu_item_id: row.menu_item_id,
@@ -500,9 +510,8 @@ function orderFromRow(row: OrderRow): Order {
     worker_order_earnings: workerOrderEarnings,
     worker_tip_earnings: workerTipEarnings,
     transfer_fees_by_worker: transferFeesByWorker,
-    transfer_fee_worker_id:
-      row.transfer_fee_worker_id ?? inferredTransferFeeWorkerId,
-    reassignment_history: parseReassignmentHistory(row.reassignment_history_json),
+    transfer_fees: transferFees,
+    reassignment_history: reassignmentHistory,
     final_club_income:
       row.final_club_income_cents === null
         ? null
@@ -708,9 +717,9 @@ async function attachUnassignedOrdersToPeriod(
   const path = settlementJsonPath(workerId);
   await db
     .prepare(
-      "UPDATE orders SET settlement_period_ids_by_worker_json = json_set(COALESCE(NULLIF(settlement_period_ids_by_worker_json, ''), '{}'), ?, ?), settlement_period_id = COALESCE(settlement_period_id, ?) WHERE EXISTS (SELECT 1 FROM json_each(assigned_worker_ids_json) AS assigned WHERE assigned.value = ?) AND json_extract(COALESCE(NULLIF(settlement_period_ids_by_worker_json, ''), '{}'), ?) IS NULL AND json_extract(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?) IS NULL",
+      "UPDATE orders SET settlement_period_ids_by_worker_json = json_set(COALESCE(NULLIF(settlement_period_ids_by_worker_json, ''), '{}'), ?, ?), settlement_period_id = COALESCE(settlement_period_id, ?) WHERE (EXISTS (SELECT 1 FROM json_each(assigned_worker_ids_json) AS assigned WHERE assigned.value = ?) OR json_extract(COALESCE(NULLIF(transfer_fees_by_worker_json, ''), '{}'), ?) IS NOT NULL) AND json_extract(COALESCE(NULLIF(settlement_period_ids_by_worker_json, ''), '{}'), ?) IS NULL AND json_extract(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?) IS NULL",
     )
-    .bind(path, periodId, periodId, workerId, path, path)
+    .bind(path, periodId, periodId, workerId, path, path, path)
     .run();
 }
 
@@ -876,7 +885,7 @@ async function settleWorkerPeriodOnServer(
     statements.push(
       db
         .prepare(
-          "UPDATE orders SET settlement_ids_by_worker_json = json_set(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?, ?), settlement_id = ?, settled = CASE WHEN json_array_length(assigned_worker_ids_json) <= (SELECT COUNT(*) FROM json_each(json_set(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?, ?))) THEN 1 ELSE 0 END WHERE id = ? AND status = 'completed' AND json_extract(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?) IS NULL AND EXISTS (SELECT 1 FROM settlement_records WHERE id = ?)",
+          "UPDATE orders SET settlement_ids_by_worker_json = json_set(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?, ?), settlement_id = ?, settled = CASE WHEN (SELECT COUNT(*) FROM json_each(COALESCE(NULLIF(worker_order_earnings_json, ''), '{}'))) <= (SELECT COUNT(*) FROM json_each(json_set(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?, ?))) THEN 1 ELSE 0 END WHERE id = ? AND status = 'completed' AND json_extract(COALESCE(NULLIF(settlement_ids_by_worker_json, ''), '{}'), ?) IS NULL AND EXISTS (SELECT 1 FROM settlement_records WHERE id = ?)",
       )
       .bind(path, recordId, recordId, path, recordId, order.id, path, recordId),
     );
@@ -997,7 +1006,7 @@ async function deleteSettlementRecordOnServer(settlementId: string) {
     delete nextSettlementIds[record.worker_id];
     const nextPeriodIds = { ...order.settlement_period_ids_by_worker };
     if (activePeriod) nextPeriodIds[record.worker_id] = activePeriod.id;
-    const fullySettled = order.assigned_worker_ids.every(
+    const fullySettled = Object.keys(order.worker_order_earnings).every(
       (workerId) => Boolean(nextSettlementIds[workerId]),
     );
     const remainingSettlementId = Object.values(nextSettlementIds).at(-1) ?? null;
@@ -1812,17 +1821,18 @@ export async function POST(request: Request) {
         .prepare(ORDER_SELECT)
         .all<OrderRow>();
       const allOrderModels = orderResult.results.map(orderFromRow);
-      const relatedOrders = orderResult.results.filter((order) =>
-        (JSON.parse(order.assigned_worker_ids_json) as string[]).includes(workerId),
-      );
       const relatedOrderModels = allOrderModels.filter((order) =>
-        order.assigned_worker_ids.includes(workerId),
+        order.assigned_worker_ids.includes(workerId) ||
+        order.transfer_fees.some((record) => record.to_worker_id === workerId),
+      );
+      const relatedOrderIds = new Set(relatedOrderModels.map((order) => order.id));
+      const relatedOrders = orderResult.results.filter((order) =>
+        relatedOrderIds.has(order.id),
       );
       if (relatedOrders.some((order) => order.status === "active")) {
         return Response.json({ error: "该打手正在接单，无法删除" }, { status: 409 });
       }
 
-      const relatedOrderIds = new Set(relatedOrders.map((order) => order.id));
       const pendingRelatedRecords = relatedOrders.length
         ? await db
             .prepare(`${SETTLEMENT_RECORD_SELECT} WHERE status = 'pending'`)
@@ -1978,10 +1988,31 @@ export async function POST(request: Request) {
             : entry,
         ),
       };
-      // 每张订单仅保留一个当前转单费归属人；历史换人轨迹另存日志。
-      const transferFeesByWorker: WorkerEarningsByWorker = {
-        [replacement.id]: transferFee,
-      };
+      const changedAt = new Date().toISOString();
+      const reassignmentHistory = parseReassignmentHistory(
+        row.reassignment_history_json,
+      );
+      const existingTransferFees = resolveTransferFeeRecords({
+        orderId: row.id,
+        storedRecords: JSON.parse(row.transfer_fees_json || "[]"),
+        legacyTotals: parseStoredWorkerEarnings(row.transfer_fees_by_worker_json),
+        reassignmentHistory,
+        fallbackCreatedAt: Date.parse(row.created_at) || Date.parse(changedAt),
+      });
+      // 每次换人只追加一笔独立记录。此前任何打手收到的转单费都不会被覆盖。
+      const transferFees = [
+        ...existingTransferFees,
+        {
+          id: crypto.randomUUID(),
+          fee: transferFee,
+          to_worker_id: replacement.id,
+          to_worker_name_snapshot: replacement.name,
+          from_worker_id: oldWorker.id,
+          from_worker_name_snapshot: oldWorker.name,
+          created_at: Date.parse(changedAt),
+        },
+      ];
+      const transferFeesByWorker = aggregateTransferFees(transferFees);
       // 换人后继续沿用原订单冻结价格。新打手的订单份额按其档位重新计算，
       // 转单费作为独立工资直接加给新打手，但不参与订单抽成计算；
       // 俱乐部仍按新打手与保留打手的订单份额计算抽成，被换下打手账面不扣款。
@@ -1990,10 +2021,6 @@ export async function POST(request: Request) {
         {},
         fromCents(amounts.orderOriginalTotalCents),
         transferFeesByWorker,
-      );
-      const changedAt = new Date().toISOString();
-      const reassignmentHistory = parseReassignmentHistory(
-        row.reassignment_history_json,
       );
       reassignmentHistory.push({
         changed_at: changedAt,
@@ -2006,7 +2033,10 @@ export async function POST(request: Request) {
       const settlementPeriodIdsByWorker = parseSettlementIdsByWorker(
         row.settlement_period_ids_by_worker_json,
       );
-      delete settlementPeriodIdsByWorker[oldWorkerId];
+      // 若被换下打手曾收到过本单转单费，保留其周期关联，确保历史工资仍可结算。
+      if ((transferFeesByWorker[oldWorkerId] ?? 0) <= 0) {
+        delete settlementPeriodIdsByWorker[oldWorkerId];
+      }
       const periodSetup = await ensureOrderPeriodsForWorkers(
         [replacement.id],
         Date.parse(changedAt),
@@ -2017,12 +2047,12 @@ export async function POST(request: Request) {
       try {
         const [orderResult, replacementResult, oldWorkerResult] = await db.batch([
           db
-            .prepare("UPDATE orders SET assigned_worker_ids_json = ?, pricing_snapshot_json = ?, transfer_fees_by_worker_json = ?, transfer_fee_worker_id = ?, reassignment_history_json = ?, settlement_period_id = ?, settlement_period_ids_by_worker_json = ? WHERE id = ? AND status = 'active' AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
+            .prepare("UPDATE orders SET assigned_worker_ids_json = ?, pricing_snapshot_json = ?, transfer_fees_by_worker_json = ?, transfer_fees_json = ?, reassignment_history_json = ?, settlement_period_id = ?, settlement_period_ids_by_worker_json = ? WHERE id = ? AND status = 'active' AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'busy') AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'idle')")
             .bind(
               JSON.stringify(newAssignedWorkerIds),
               JSON.stringify(newSnapshot),
               JSON.stringify(transferFeesByWorker),
-              replacement.id,
+              JSON.stringify(transferFees),
               JSON.stringify(reassignmentHistory),
               settlementPeriodIdsByWorker[newAssignedWorkerIds[0]] ?? null,
               JSON.stringify(settlementPeriodIdsByWorker),
@@ -2305,15 +2335,15 @@ export async function POST(request: Request) {
        *    基础实得 63 元和 67.2 元；若仅给 1档打手 10 元打赏，最终实得
        *    73 元和 67.2 元，俱乐部仍实得 37.8 元。
        */
-      const storedTransferFees = parseStoredWorkerEarnings(
-        row.transfer_fees_by_worker_json,
-      );
-      const transferFeeWorkerId = row.transfer_fee_worker_id ??
-        Object.entries(storedTransferFees).find(([, amount]) => amount > 0)?.[0] ??
-        null;
-      const transferFeesByWorker: WorkerEarningsByWorker = transferFeeWorkerId
-        ? { [transferFeeWorkerId]: storedTransferFees[transferFeeWorkerId] ?? 0 }
-        : {};
+      const transferFees = resolveTransferFeeRecords({
+        orderId: row.id,
+        storedRecords: JSON.parse(row.transfer_fees_json || "[]"),
+        legacyTotals: parseStoredWorkerEarnings(row.transfer_fees_by_worker_json),
+        reassignmentHistory: parseReassignmentHistory(row.reassignment_history_json),
+        fallbackCreatedAt: Date.parse(row.created_at) || 0,
+      });
+      // 所有换人记录独立累加；后一次换人绝不覆盖前一次转单费。
+      const transferFeesByWorker = aggregateTransferFees(transferFees);
       const settlement = calculateSettlementWithTransferFees(
         snapshot,
         tipsByWorker,

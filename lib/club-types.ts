@@ -136,6 +136,16 @@ export interface ReassignmentLog {
   transfer_fee: number;
 }
 
+export interface TransferFeeRecord {
+  id: string;
+  fee: number;
+  to_worker_id: string;
+  to_worker_name_snapshot: string;
+  from_worker_id: string;
+  from_worker_name_snapshot: string;
+  created_at: number;
+}
+
 export interface Order {
   id: string;
   menu_item_id: string;
@@ -157,10 +167,10 @@ export interface Order {
   worker_order_earnings: WorkerEarningsByWorker;
   /** 每名打手即时到账的打赏，不进入工资结算周期。 */
   worker_tip_earnings: WorkerEarningsByWorker;
-  /** 当前参与打手对应的转单费；属于工资并在订单完结后进入结算周期。 */
+  /** 由 transfer_fees 汇总得出；保留用于旧数据兼容与工资查询。 */
   transfer_fees_by_worker: WorkerEarningsByWorker;
-  /** 当前转单费唯一归属的打手 ID；旧数据可由 transfer_fees_by_worker 推断。 */
-  transfer_fee_worker_id: string | null;
+  /** 每次换人只追加一笔，完整保留所有转单费及其收付快照。 */
+  transfer_fees: TransferFeeRecord[];
   /** 换人追溯记录；旧订单缺失时按空数组读取。 */
   reassignment_history: ReassignmentLog[];
   final_club_income: number | null;

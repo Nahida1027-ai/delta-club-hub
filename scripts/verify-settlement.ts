@@ -18,6 +18,10 @@ import {
   resolveOrderTipsByWorker,
   specialRequirementsTotal,
 } from "../lib/settlement";
+import {
+  aggregateTransferFees,
+  resolveTransferFeeRecords,
+} from "../lib/transfer-fees";
 
 const zeroTierRates: TierCommissionRates = {
   "1档": 0,
@@ -211,6 +215,19 @@ const cases = [
     ),
     expected: { club: 42, workers: [83, 63], externalTransferFee: 20 },
   },
+  {
+    name: "连续换人验收样例: C 保留 20 元且 D 新增 30 元",
+    result: calculateSettlementWithTransferFees(
+      snapshot(168, 0, [worker("D", 50, "2档"), worker("C", 50, "1档")], {
+        commissionMode: "by_tier",
+        tierRates: { "1档": 25, "2档": 20, "3档": 15, "娱乐陪玩": 0 },
+      }),
+      {},
+      168,
+      { C: 20, D: 30 },
+    ),
+    expected: { club: 37.8, workers: [97.2, 83], externalTransferFee: 50 },
+  },
 ];
 
 for (const scenario of cases) {
@@ -346,6 +363,37 @@ assert.throws(
   () => normalizeCompanionHours(1.25),
   /0.5 小时为步进/,
   "陪玩时长必须使用半小时步进",
+);
+
+const restoredTransferFees = resolveTransferFeeRecords({
+  orderId: "order-multi-reassign",
+  storedRecords: [],
+  legacyTotals: { D: 30 },
+  reassignmentHistory: [
+    {
+      changed_at: "2025-01-01T07:30:00.000Z",
+      old_worker_id: "B",
+      old_worker_name: "打手B",
+      new_worker_id: "C",
+      new_worker_name: "打手C",
+      transfer_fee: 20,
+    },
+    {
+      changed_at: "2025-01-02T02:15:00.000Z",
+      old_worker_id: "A",
+      old_worker_name: "打手A",
+      new_worker_id: "D",
+      new_worker_name: "打手D",
+      transfer_fee: 30,
+    },
+  ],
+  fallbackCreatedAt: 0,
+});
+assert.equal(restoredTransferFees.length, 2, "旧换人日志必须恢复为两笔独立转单费");
+assert.deepEqual(
+  aggregateTransferFees(restoredTransferFees),
+  { C: 20, D: 30 },
+  "多次换人的转单费必须按收款打手分别累计",
 );
 
 console.log(

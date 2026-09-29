@@ -73,7 +73,7 @@ const data: ClubData = {
       worker_order_earnings: { "worker-a": 86.25, "worker-b": 92 },
       worker_tip_earnings: { "worker-a": 10, "worker-b": 0 },
       transfer_fees_by_worker: {},
-      transfer_fee_worker_id: null,
+      transfer_fees: [],
       reassignment_history: [],
       final_club_income: 51.75,
       final_worker_incomes: [

@@ -69,6 +69,8 @@ export const orders = sqliteTable(
     workerOrderEarningsJson: text("worker_order_earnings_json").notNull().default("{}"),
     workerTipEarningsJson: text("worker_tip_earnings_json").notNull().default("{}"),
     transferFeesByWorkerJson: text("transfer_fees_by_worker_json").notNull().default("{}"),
+    transferFeesJson: text("transfer_fees_json").notNull().default("[]"),
+    // 旧版单值字段仅用于兼容已经部署的表结构，新逻辑不再读写。
     transferFeeWorkerId: text("transfer_fee_worker_id"),
     reassignmentHistoryJson: text("reassignment_history_json").notNull().default("[]"),
     finalClubIncomeCents: integer("final_club_income_cents"),

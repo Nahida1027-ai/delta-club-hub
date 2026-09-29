@@ -446,18 +446,10 @@ export function calculateSettlementWithTransferFees(
   transferFeesByWorker: WorkerEarningsByWorker = {},
 ): SettlementResult {
   const base = calculateSettlement(snapshot, tipsByWorker, orderOriginalTotal);
-  const workerIds = snapshot.payout_weights.map((entry) => entry.workerId);
-  const allowedWorkerIds = new Set(workerIds);
-  for (const workerId of Object.keys(transferFeesByWorker ?? {})) {
-    if (!allowedWorkerIds.has(workerId)) {
-      throw new Error("转单费只能归属于当前订单参与打手");
-    }
-  }
-
   const normalizedFees = Object.fromEntries(
-    workerIds.map((workerId) => [
+    Object.entries(transferFeesByWorker ?? {}).map(([workerId, amount]) => [
       workerId,
-      fromCents(toCents(Number(transferFeesByWorker?.[workerId] ?? 0))),
+      fromCents(toCents(Number(amount ?? 0))),
     ]),
   ) as WorkerEarningsByWorker;
   const transferFeeCents = Object.values(normalizedFees).reduce(
@@ -475,16 +467,25 @@ export function calculateSettlementWithTransferFees(
     throw new Error("转单后的结算金额超出安全范围");
   }
 
+  const incomesByWorker = new Map(
+    base.worker_incomes.map((income) => [income.workerId, toCents(income.amount)]),
+  );
+  for (const [workerId, fee] of Object.entries(normalizedFees)) {
+    incomesByWorker.set(
+      workerId,
+      (incomesByWorker.get(workerId) ?? 0) + toCents(fee),
+    );
+  }
+
   return {
     ...base,
     // 转单费是独立工资补偿，不改变订单本身计算出的俱乐部抽成。
     club_income: base.club_income,
     worker_pool: fromCents(workerPoolCents),
-    worker_incomes: base.worker_incomes.map((income) => ({
-      ...income,
-      amount: fromCents(
-        toCents(income.amount) + toCents(normalizedFees[income.workerId] ?? 0),
-      ),
+    // 历史换人收款人即使后来再次被换下，已经产生的转单费仍独立保留。
+    worker_incomes: [...incomesByWorker].map(([workerId, cents]) => ({
+      workerId,
+      amount: fromCents(cents),
     })),
   };
 }

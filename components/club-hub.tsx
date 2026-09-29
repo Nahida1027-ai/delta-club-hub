@@ -128,6 +128,7 @@ import {
   totalEarningsMap,
   workerOrderEarningForOrder,
 } from "@/lib/order-earnings";
+import { aggregateTransferFees } from "@/lib/transfer-fees";
 
 const glassCard =
   "rounded-[22px] border border-white/[0.08] bg-[#1c1c1e]/75 shadow-[0_18px_50px_rgba(0,0,0,0.22)] backdrop-blur-md";
@@ -355,13 +356,16 @@ function Dashboard({
   const workerData = workers
     .map((worker) => {
       const relevant = completed.filter((order) => order.assigned_worker_ids.includes(worker.id));
+      const incomeRelevant = completed.filter(
+        (order) => (resolveWorkerOrderEarnings(order)[worker.id] ?? 0) > 0,
+      );
       return {
         id: worker.id,
         name: worker.name,
         tier: worker.tier,
         workerType: worker.workerType,
         orders: relevant.length,
-        orderIncome: relevant.reduce(
+        orderIncome: incomeRelevant.reduce(
           (sum, order) =>
             sum + (resolveWorkerOrderEarnings(order)[worker.id] ?? 0),
           0,
@@ -759,20 +763,16 @@ function WorkerBoard({ workers, orders, menu }: { workers: Worker[]; orders: Ord
             const activeOrder = orders.find(
               (order) => order.status === "active" && order.assigned_worker_ids.includes(worker.id),
             );
-            const activeTransferFees = activeOrder?.transfer_fees_by_worker ?? {};
-            const transferFeeWorkerId = activeOrder?.transfer_fee_worker_id ??
-              Object.entries(activeTransferFees).find(([, amount]) => amount > 0)?.[0] ??
-              null;
-            const workerTransferFee = transferFeeWorkerId === worker.id
-              ? activeTransferFees[worker.id] ?? 0
-              : 0;
+            const workerTransferFee = (activeOrder?.transfer_fees ?? [])
+              .filter((record) => record.to_worker_id === worker.id)
+              .reduce((sum, record) => sum + record.fee, 0);
             const busy = worker.status === "busy";
             const hasOverduePayroll = overdueWorkerIds.has(worker.id);
             const pendingOrderWage = orders
               .filter(
                 (order) =>
                   order.status === "completed" &&
-                  order.assigned_worker_ids.includes(worker.id) &&
+                  (resolveWorkerOrderEarnings(order)[worker.id] ?? 0) > 0 &&
                   !order.settlement_ids_by_worker?.[worker.id],
               )
               .reduce(
@@ -1238,17 +1238,9 @@ function FinishOrderDialog({
       throw new Error("请检查每名打手的打赏金额");
     }
     totalTip = tipsByWorkerTotal(tipsByWorker);
-    const transferFeeWorkerId = order.transfer_fee_worker_id ??
-      Object.entries(order.transfer_fees_by_worker ?? {}).find(
-        ([, amount]) => amount > 0,
-      )?.[0] ??
-      null;
-    const effectiveTransferFees = transferFeeWorkerId
-      ? {
-          [transferFeeWorkerId]:
-            order.transfer_fees_by_worker?.[transferFeeWorkerId] ?? 0,
-        }
-      : {};
+    const effectiveTransferFees = order.transfer_fees?.length
+      ? aggregateTransferFees(order.transfer_fees)
+      : order.transfer_fees_by_worker ?? {};
     preview = calculateSettlementWithTransferFees(
       order.pricing_snapshot,
       tipsByWorker,
@@ -1543,16 +1535,10 @@ function OrderHistoryItem({
   const orderType = normalizeOrderType(order.order_type ?? order.pricing_snapshot.order_type);
   const tipsByWorker = resolveWorkerTipEarnings(order);
   const orderEarningsByWorker = resolveWorkerOrderEarnings(order);
-  const transferFeesByWorker = order.transfer_fees_by_worker ?? {};
-  const transferFeeWorkerId = order.transfer_fee_worker_id ??
-    Object.entries(transferFeesByWorker).find(([, amount]) => amount > 0)?.[0] ??
-    null;
-  const transferFee = transferFeeWorkerId
-    ? transferFeesByWorker[transferFeeWorkerId] ?? 0
-    : 0;
-  const transferLog = [...(order.reassignment_history ?? [])]
-    .reverse()
-    .find((entry) => entry.new_worker_id === transferFeeWorkerId);
+  const transferFees = order.transfer_fees ?? [];
+  const transferFeesByWorker = transferFees.length
+    ? aggregateTransferFees(transferFees)
+    : order.transfer_fees_by_worker ?? {};
   const totalTip = totalEarningsMap(tipsByWorker);
   const commissionText = order.pricing_snapshot.commission_mode === "by_tier"
     ? `档位抽成 1档 ${order.pricing_snapshot.tier_commission_rates["1档"]}% / 2档 ${order.pricing_snapshot.tier_commission_rates["2档"]}% / 3档 ${order.pricing_snapshot.tier_commission_rates["3档"]}% / 娱乐 ${order.pricing_snapshot.tier_commission_rates["娱乐陪玩"] ?? 0}%`
@@ -1614,14 +1600,23 @@ function OrderHistoryItem({
                   <span>基础价格</span><span className="text-right text-white/75">{formatMoney(order.base_price_snapshot)}</span>
                   <span>特殊需求加价</span><span className="text-right text-[#C4C3FF]">+{formatMoney(order.special_total)}</span>
                   <span>订单总价</span><span className="text-right font-medium text-white">{formatMoney(order.total_price)}</span>
-                  {transferFeeWorkerId && transferFee > 0 ? (
-                    <>
-                      <span>转单费（工资属性）</span>
-                      <span className="text-right text-[#5FE778]">
-                        {workerName(workers, transferFeeWorkerId, order)}：+{formatMoney(transferFee)}
-                        {transferLog ? `（由${transferLog.old_worker_name}承担）` : ""}
-                      </span>
-                    </>
+                  {transferFees.length ? (
+                    <div className="col-span-2 mt-1 border-t border-white/[0.06] pt-2">
+                      <p className="mb-2 text-white/40">转单费明细（工资属性）</p>
+                      <div className="space-y-1.5">
+                        {transferFees.map((record) => (
+                          <div key={record.id} className="flex items-start justify-between gap-3 text-white/65">
+                            <span>
+                              {record.to_worker_name_snapshot}：
+                              <span className="font-medium text-[#5FE778]">+{formatMoney(record.fee)}</span>
+                            </span>
+                            <span className="text-right text-white/35">
+                              由{record.from_worker_name_snapshot}承担 · {formatDateTime(new Date(record.created_at).toISOString())}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   ) : null}
                   <span>即时打赏</span><span className="text-right text-[#FFB65C]">+{formatMoney(totalTip)}</span>
                   <span>俱乐部实得</span><span className="text-right text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</span>
@@ -1658,9 +1653,7 @@ function OrderHistoryItem({
                     {order.final_worker_incomes.map((income) => {
                       const personalTip = tipsByWorker[income.workerId] ?? 0;
                       const baseIncome = orderEarningsByWorker[income.workerId] ?? 0;
-                      const personalTransferFee = income.workerId === transferFeeWorkerId
-                        ? transferFee
-                        : 0;
+                      const personalTransferFee = transferFeesByWorker[income.workerId] ?? 0;
                       const orderShare = Math.max(0, baseIncome - personalTransferFee);
                       return (
                         <div key={income.workerId} className="flex items-start justify-between gap-3 text-white/65">

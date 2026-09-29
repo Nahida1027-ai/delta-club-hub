@@ -1,0 +1,1 @@
+ALTER TABLE `orders` ADD `transfer_fees_json` text DEFAULT '[]' NOT NULL;

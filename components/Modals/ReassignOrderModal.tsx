@@ -28,6 +28,7 @@ import {
   toCents,
 } from "@/lib/settlement";
 import { isWorkerEligibleForRule } from "@/lib/worker-eligibility";
+import { aggregateTransferFees } from "@/lib/transfer-fees";
 import { useClubStore } from "@/store/use-club-store";
 
 const inputClass =
@@ -169,7 +170,12 @@ export function ReassignOrderModal({
         {},
         order.order_original_total,
       );
-      const transferFees = { [selectedWorker.id]: transferFee };
+      const transferFees = order.transfer_fees?.length
+        ? aggregateTransferFees(order.transfer_fees)
+        : { ...(order.transfer_fees_by_worker ?? {}) };
+      transferFees[selectedWorker.id] = fromCents(
+        toCents(transferFees[selectedWorker.id] ?? 0) + toCents(transferFee),
+      );
       const finalPreview = calculateSettlementWithTransferFees(
         replacementSnapshot,
         {},

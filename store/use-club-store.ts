@@ -51,6 +51,7 @@ import {
   deriveWorkerOrderEarnings,
   resolveWorkerTipEarnings,
 } from "@/lib/order-earnings";
+import { aggregateTransferFees } from "@/lib/transfer-fees";
 
 interface ApiData extends ClubData {
   created_order_id?: string;
@@ -150,7 +151,7 @@ function decrementCompletionCounts(workers: Worker[], removedOrders: Order[]) {
   removedOrders
     .filter((order) => order.status === "completed")
     .forEach((order) => {
-      new Set(order.final_worker_incomes.map((income) => income.workerId)).forEach((workerId) => {
+      new Set(order.assigned_worker_ids).forEach((workerId) => {
         decrements.set(workerId, (decrements.get(workerId) ?? 0) + 1);
       });
       Object.entries(resolveWorkerTipEarnings(order)).forEach(([workerId, amount]) => {
@@ -772,9 +773,14 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       throw new Error("该打手有待发放结算，请先处理");
     }
 
-    const removedOrders = state.orders.filter((order) =>
-      order.assigned_worker_ids.includes(id),
+    const removedOrders = state.orders.filter(
+      (order) =>
+        order.assigned_worker_ids.includes(id) ||
+        (order.transfer_fees ?? []).some((record) => record.to_worker_id === id),
     );
+    if (removedOrders.some((order) => order.status === "active")) {
+      throw new Error("该打手仍关联进行中的转单，无法删除");
+    }
     // 删除关联订单时，订单工资和即时打赏都会从实时汇总中移除；
     // 待发放记录只回退订单工资，打赏从累计即时打赏中扣除。
     const previous = clubSnapshot(state);
@@ -783,7 +789,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         state.workers.filter((candidate) => candidate.id !== id),
         removedOrders,
       ),
-      orders: state.orders.filter((order) => !order.assigned_worker_ids.includes(id)),
+      orders: state.orders.filter((order) => !removedOrders.includes(order)),
       settlementRecords: state.settlementRecords.map((record) => {
         if (record.status !== "pending") return record;
         const removedIds = new Set(removedOrders.map((order) => order.id));
@@ -911,8 +917,21 @@ export const useClubStore = create<ClubStore>((set, get) => ({
           : entry,
       ),
     };
-    // 当前订单只允许一个转单费收款人，避免保留打手误吃到转单费。
-    const transferFeesByWorker = { [replacement.id]: transferFee };
+    const changedAt = new Date().toISOString();
+    const transferFees = [
+      ...(order.transfer_fees ?? []),
+      {
+        id: crypto.randomUUID(),
+        fee: transferFee,
+        to_worker_id: replacement.id,
+        to_worker_name_snapshot: replacement.name,
+        from_worker_id: oldWorker.id,
+        from_worker_name_snapshot: oldWorker.name,
+        created_at: Date.parse(changedAt),
+      },
+    ];
+    // 转单费以明细数组为权威来源；汇总映射仅供工资计算与旧数据兼容。
+    const transferFeesByWorker = aggregateTransferFees(transferFees);
     calculateSettlementWithTransferFees(
       pricingSnapshot,
       {},
@@ -920,16 +939,17 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       transferFeesByWorker,
     );
 
-    const changedAt = new Date().toISOString();
     const optimisticPeriodId = replacement.active_period_id ?? `period-reassign-${Date.now()}`;
     const optimisticPeriodIds = { ...order.settlement_period_ids_by_worker };
-    delete optimisticPeriodIds[oldWorkerId];
+    if ((transferFeesByWorker[oldWorkerId] ?? 0) <= 0) {
+      delete optimisticPeriodIds[oldWorkerId];
+    }
     optimisticPeriodIds[replacement.id] = optimisticPeriodId;
     const optimisticOrder: Order = {
       ...order,
       assigned_worker_ids: assignedWorkerIds,
       transfer_fees_by_worker: transferFeesByWorker,
-      transfer_fee_worker_id: replacement.id,
+      transfer_fees: transferFees,
       reassignment_history: [
         ...(order.reassignment_history ?? []),
         {
@@ -1137,7 +1157,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       worker_order_earnings: {},
       worker_tip_earnings: {},
       transfer_fees_by_worker: {},
-      transfer_fee_worker_id: null,
+      transfer_fees: [],
       reassignment_history: [],
       final_club_income: null,
       final_worker_incomes: [],
@@ -1208,17 +1228,9 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       tipsByWorker,
     );
     const totalTip = tipsByWorkerTotal(normalizedTipsByWorker);
-    const transferFeeWorkerId = order.transfer_fee_worker_id ??
-      Object.entries(order.transfer_fees_by_worker ?? {}).find(
-        ([, amount]) => amount > 0,
-      )?.[0] ??
-      null;
-    const effectiveTransferFees = transferFeeWorkerId
-      ? {
-          [transferFeeWorkerId]:
-            order.transfer_fees_by_worker?.[transferFeeWorkerId] ?? 0,
-        }
-      : {};
+    const effectiveTransferFees = order.transfer_fees?.length
+      ? aggregateTransferFees(order.transfer_fees)
+      : order.transfer_fees_by_worker ?? {};
     const settlement = calculateSettlementWithTransferFees(
       order.pricing_snapshot,
       normalizedTipsByWorker,
