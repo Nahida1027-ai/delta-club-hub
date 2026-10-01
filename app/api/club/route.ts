@@ -63,6 +63,13 @@ import {
   isWorkerEligibleForMenuItem,
   isWorkerEligibleForRule,
 } from "@/lib/worker-eligibility";
+import {
+  calculateDiscountedOrderTotals,
+  createDefaultOrderNo,
+  fallbackOrderNo,
+  normalizeCustomOrderNo,
+  normalizeOptionalPercentage,
+} from "@/lib/order-presentation";
 
 export const runtime = "edge";
 
@@ -129,9 +136,16 @@ interface OrderRow {
   special_total_cents: number;
   total_price_cents: number;
   order_original_total_cents: number;
+  original_total_before_discount_cents: number;
+  discount_amount_cents: number;
+  override_commission_bps: number | null;
+  override_discount_bps: number | null;
   pricing_snapshot_json: string;
+  custom_order_no: string;
   created_at: string;
+  display_created_at: string | null;
   completed_at: string | null;
+  display_completed_at: string | null;
   settled: number;
   settlement_id: string | null;
   settlement_ids_by_worker_json: string;
@@ -169,7 +183,7 @@ interface SettlementRecordRow {
 const WORKER_SELECT =
   "SELECT id, name, gender, tier, worker_type, sort_order, status, total_completed_orders, total_tip_earnings_cents, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id FROM workers";
 const ORDER_SELECT =
-  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, worker_order_earnings_json, worker_tip_earnings_json, transfer_fees_by_worker_json, transfer_fees_json, reassignment_history_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, created_at, completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
+  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, worker_order_earnings_json, worker_tip_earnings_json, transfer_fees_by_worker_json, transfer_fees_json, reassignment_history_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, original_total_before_discount_cents, discount_amount_cents, override_commission_bps, override_discount_bps, pricing_snapshot_json, custom_order_no, created_at, display_created_at, completed_at, display_completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
 const SETTLEMENT_PERIOD_SELECT =
   "SELECT id, worker_id, started_at, ended_at, status, settlement_record_id FROM settlement_periods";
 const SETTLEMENT_RECORD_SELECT =
@@ -321,6 +335,17 @@ function normalizeCommissionRate(value: unknown, label: string) {
   return basisPoints / 100;
 }
 
+/** 仅用于订单展示层的时间字段；绝不改写订单原始 created_at。 */
+function normalizeDisplayDateTime(value: unknown, label: string, allowEmpty = false) {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    if (allowEmpty) return null;
+    throw new Error(`请选择有效的${label}`);
+  }
+  const timestamp = Date.parse(String(value));
+  if (!Number.isFinite(timestamp)) throw new Error(`${label}格式无效`);
+  return new Date(timestamp).toISOString();
+}
+
 function normalizeTierCommissionRates(value: unknown): TierCommissionRates {
   const parsed = typeof value === "string" ? JSON.parse(value) : value;
   if (parsed === undefined || parsed === null) return defaultTierCommissionRates();
@@ -357,6 +382,10 @@ function normalizePricingSnapshot(value: unknown): OrderPricingSnapshot {
     ),
     tier_commission_rates: normalizeTierCommissionRates(
       snapshot.tier_commission_rates,
+    ),
+    override_commission_rate: normalizeOptionalPercentage(
+      snapshot.override_commission_rate,
+      "临时抽成",
     ),
     payout_weights: snapshot.payout_weights.map((entry) => ({
       ...entry,
@@ -437,18 +466,30 @@ function orderAmountsFromRow(row: OrderRow, snapshot: OrderPricingSnapshot) {
     ? row.base_price_snapshot_cents
     : toCents(snapshot.base_price);
   const specialTotalCents = row.special_total_cents;
-  const totalPriceCents = row.total_price_cents > 0
+  // 100% 临时折扣会产生合法的 0 元订单。只要存在本次扩展的折扣快照字段，
+  // 就不能再用 “> 0” 把它回退成折扣前金额。
+  const hasDiscountSnapshot =
+    row.original_total_before_discount_cents > 0 ||
+    row.discount_amount_cents > 0 ||
+    row.override_discount_bps !== null;
+  const totalPriceCents = row.total_price_cents > 0 || hasDiscountSnapshot
     ? row.total_price_cents
     : basePriceSnapshotCents + specialTotalCents;
-  const orderOriginalTotalCents = row.order_original_total_cents > 0
+  const orderOriginalTotalCents = row.order_original_total_cents > 0 || hasDiscountSnapshot
     ? row.order_original_total_cents
     : totalPriceCents;
+  const originalTotalBeforeDiscountCents = row.original_total_before_discount_cents > 0
+    ? row.original_total_before_discount_cents
+    : basePriceSnapshotCents + specialTotalCents;
+  const discountAmountCents = Math.max(0, row.discount_amount_cents ?? 0);
 
   return {
     basePriceSnapshotCents,
     specialTotalCents,
     totalPriceCents,
     orderOriginalTotalCents,
+    originalTotalBeforeDiscountCents,
+    discountAmountCents,
   };
 }
 
@@ -522,9 +563,25 @@ function orderFromRow(row: OrderRow): Order {
     special_total: fromCents(amounts.specialTotalCents),
     total_price: fromCents(amounts.totalPriceCents),
     order_original_total: fromCents(amounts.orderOriginalTotalCents),
+    original_total_before_discount: fromCents(amounts.originalTotalBeforeDiscountCents),
+    discount_amount: fromCents(amounts.discountAmountCents),
+    override_commission_rate:
+      row.override_commission_bps === null || row.override_commission_bps === undefined
+        ? pricingSnapshot.override_commission_rate ?? null
+        : row.override_commission_bps / 100,
+    override_discount:
+      row.override_discount_bps === null || row.override_discount_bps === undefined
+        ? null
+        : row.override_discount_bps / 100,
     pricing_snapshot: pricingSnapshot,
+    custom_order_no: row.custom_order_no?.trim() || fallbackOrderNo({
+      id: row.id,
+      created_at: row.created_at,
+    }),
     created_at: row.created_at,
+    display_created_at: row.display_created_at || row.created_at,
     completed_at: row.completed_at,
+    display_completed_at: row.display_completed_at ?? row.completed_at,
     settled: Boolean(row.settled),
     settlement_id: row.settlement_id ?? null,
     settlement_ids_by_worker: settlementIdsByWorker,
@@ -630,7 +687,9 @@ async function readClubData(): Promise<ClubData> {
     db.prepare(`${WORKER_SELECT} ORDER BY sort_order, id`).all<WorkerRow>(),
     db.prepare("SELECT id, service_name, folder_id, sort_order, order_type, base_price_cents, hourly_rate_cents, commission_mode, club_commission_bps, tier_commission_rates_json, split_type, tiered_ratios_json, eligible_tiers_json FROM price_menu ORDER BY sort_order, id").all<MenuRow>(),
     db.prepare("SELECT id, name, parent_id, sort_order, created_at FROM folders ORDER BY parent_id, sort_order, created_at, id").all<FolderRow>(),
-    db.prepare(`${ORDER_SELECT} ORDER BY created_at DESC`).all<OrderRow>(),
+    db
+      .prepare(`${ORDER_SELECT} ORDER BY COALESCE(NULLIF(display_created_at, ''), created_at) DESC`)
+      .all<OrderRow>(),
     db.prepare(`${SETTLEMENT_PERIOD_SELECT} ORDER BY started_at DESC, id`).all<SettlementPeriodRow>(),
     db.prepare(`${SETTLEMENT_RECORD_SELECT} ORDER BY period_end DESC, created_at DESC`).all<SettlementRecordRow>(),
   ]);
@@ -2171,6 +2230,36 @@ export async function POST(request: Request) {
       return Response.json(await readClubData());
     }
 
+    if (action === "update_order_presentation") {
+      const orderId = String(payload.order_id ?? "");
+      const row = await db
+        .prepare(`${ORDER_SELECT} WHERE id = ?`)
+        .bind(orderId)
+        .first<OrderRow>();
+      if (!row) throw new Error("订单不存在");
+
+      const customOrderNo = normalizeCustomOrderNo(payload.custom_order_no);
+      const displayCreatedAt = normalizeDisplayDateTime(payload.display_created_at, "下单时间");
+      if (!displayCreatedAt) throw new Error("请选择有效的下单时间");
+      const displayCompletedAt = normalizeDisplayDateTime(
+        payload.display_completed_at,
+        "完成时间",
+        row.status === "active",
+      );
+      if (displayCompletedAt && Date.parse(displayCompletedAt) < Date.parse(displayCreatedAt)) {
+        throw new Error("完成时间不能早于下单时间");
+      }
+      if (row.status === "completed" && !displayCompletedAt) {
+        throw new Error("已完成订单需要保留完成时间");
+      }
+
+      await db
+        .prepare("UPDATE orders SET custom_order_no = ?, display_created_at = ?, display_completed_at = ? WHERE id = ?")
+        .bind(customOrderNo, displayCreatedAt, displayCompletedAt, orderId)
+        .run();
+      return Response.json(await readClubData());
+    }
+
     if (action === "create_order") {
       const menuItemId = String(payload.menu_item_id ?? "");
       const workerIds = Array.isArray(payload.assigned_worker_ids)
@@ -2178,6 +2267,14 @@ export async function POST(request: Request) {
         : [];
       const specialRequirements = parseSpecialRequirements(
         payload.special_requirements ?? [],
+      );
+      const overrideCommissionRate = normalizeOptionalPercentage(
+        payload.override_commission_rate,
+        "临时抽成",
+      );
+      const overrideDiscount = normalizeOptionalPercentage(
+        payload.override_discount,
+        "临时折扣",
       );
       if (!workerIds.length || new Set(workerIds).size !== workerIds.length) {
         throw new Error("请选择不重复的打手");
@@ -2236,13 +2333,17 @@ export async function POST(request: Request) {
       const specialTotalCents = toCents(
         specialRequirementsTotal(specialRequirements),
       );
-      const totalPriceCents = basePriceSnapshotCents + specialTotalCents;
-      if (!Number.isSafeInteger(totalPriceCents)) {
-        throw new Error("订单总金额超出安全范围");
-      }
-      const totalPrice = fromCents(totalPriceCents);
-      // 再次走金额校验，确保多项加价求和后仍未超过全局安全上限。
-      toCents(totalPrice);
+      const discountedTotals = calculateDiscountedOrderTotals(
+        basePriceSnapshot,
+        fromCents(specialTotalCents),
+        overrideDiscount,
+      );
+      const totalPriceCents = toCents(discountedTotals.totalPrice);
+      const originalTotalBeforeDiscountCents = toCents(
+        discountedTotals.originalTotalBeforeDiscount,
+      );
+      const discountAmountCents = toCents(discountedTotals.discountAmount);
+      const totalPrice = discountedTotals.totalPrice;
       const snapshot: OrderPricingSnapshot = {
         service_name: menuRow.service_name,
         order_type: orderType,
@@ -2253,6 +2354,7 @@ export async function POST(request: Request) {
         tier_commission_rates: normalizeTierCommissionRates(
           menuRow.tier_commission_rates_json,
         ),
+        override_commission_rate: overrideCommissionRate,
         split_type: menuRow.split_type,
         tiered_ratios: ratios,
         payout_weights: payoutWeights,
@@ -2261,6 +2363,9 @@ export async function POST(request: Request) {
       calculateSettlement(snapshot, {}, totalPrice);
       const orderId = crypto.randomUUID();
       const createdAt = new Date().toISOString();
+      const customOrderNo = payload.custom_order_no === undefined
+        ? createDefaultOrderNo(createdAt)
+        : normalizeCustomOrderNo(payload.custom_order_no);
       const periodSetup = await ensureOrderPeriodsForWorkers(
         workerIds,
         Date.parse(createdAt),
@@ -2270,7 +2375,7 @@ export async function POST(request: Request) {
       const idleCheck = `SELECT COUNT(*) FROM workers WHERE id IN (${placeholders}) AND status = 'idle'`;
       try {
         const [insertResult] = await db.batch([
-          db.prepare(`INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, pricing_snapshot_json, settlement_period_id, settlement_period_ids_by_worker_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (${idleCheck}) = ? AND EXISTS (SELECT 1 FROM price_menu WHERE id = ?)`).bind(
+          db.prepare(`INSERT INTO orders (id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, original_total_before_discount_cents, discount_amount_cents, override_commission_bps, override_discount_bps, pricing_snapshot_json, settlement_period_id, settlement_period_ids_by_worker_json, custom_order_no, created_at, display_created_at) SELECT ?, ?, ?, ?, ?, ?, ?, 'active', 0, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (${idleCheck}) = ? AND EXISTS (SELECT 1 FROM price_menu WHERE id = ?)`).bind(
             orderId,
             menuItemId,
             JSON.stringify(workerIds),
@@ -2283,9 +2388,15 @@ export async function POST(request: Request) {
             specialTotalCents,
             totalPriceCents,
             totalPriceCents,
+            originalTotalBeforeDiscountCents,
+            discountAmountCents,
+            overrideCommissionRate === null ? null : Math.round(overrideCommissionRate * 100),
+            overrideDiscount === null ? null : Math.round(overrideDiscount * 100),
             JSON.stringify(snapshot),
             settlementPeriodId,
             JSON.stringify(settlementPeriodIdsByWorker),
+            customOrderNo,
+            createdAt,
             createdAt,
             ...workerIds,
             workerIds.length,
@@ -2359,13 +2470,14 @@ export async function POST(request: Request) {
       const completedAt = new Date().toISOString();
       const settlementToken = crypto.randomUUID();
       const [finishResult] = await db.batch([
-        db.prepare("UPDATE orders SET status = 'completed', tip_cents = ?, tips_by_worker_json = ?, worker_order_earnings_json = ?, worker_tip_earnings_json = ?, final_club_income_cents = ?, final_worker_incomes_json = ?, completed_at = ?, settlement_token = ? WHERE id = ? AND status = 'active'").bind(
+        db.prepare("UPDATE orders SET status = 'completed', tip_cents = ?, tips_by_worker_json = ?, worker_order_earnings_json = ?, worker_tip_earnings_json = ?, final_club_income_cents = ?, final_worker_incomes_json = ?, completed_at = ?, display_completed_at = COALESCE(display_completed_at, ?), settlement_token = ? WHERE id = ? AND status = 'active'").bind(
           toCents(totalTip),
           JSON.stringify(tipsByWorker),
           JSON.stringify(workerOrderEarnings),
           JSON.stringify(workerTipEarnings),
           toCents(settlement.club_income),
           JSON.stringify(settlement.worker_incomes),
+          completedAt,
           completedAt,
           settlementToken,
           orderId,

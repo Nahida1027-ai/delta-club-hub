@@ -52,6 +52,12 @@ import {
   resolveWorkerTipEarnings,
 } from "@/lib/order-earnings";
 import { aggregateTransferFees } from "@/lib/transfer-fees";
+import {
+  calculateDiscountedOrderTotals,
+  createDefaultOrderNo,
+  normalizeCustomOrderNo,
+  normalizeOptionalPercentage,
+} from "@/lib/order-presentation";
 
 interface ApiData extends ClubData {
   created_order_id?: string;
@@ -112,7 +118,18 @@ interface ClubStore extends ClubData {
     workerIds: string[],
     specialRequirements?: SpecialRequirement[],
     hours?: number,
+    customOrderNo?: string,
+    overrideCommissionRate?: number | null,
+    overrideDiscount?: number | null,
   ) => Promise<string>;
+  updateOrderTimeAndNo: (
+    orderId: string,
+    data: {
+      custom_order_no: string;
+      display_created_at: string;
+      display_completed_at: string | null;
+    },
+  ) => Promise<void>;
   finishOrder: (orderId: string, tipsByWorker: TipsByWorker) => Promise<SettlementResult>;
   ensureActivePeriodForWorker: (workerId: string) => Promise<SettlementPeriod>;
   settleWorkerPeriod: (workerId: string, endedAt: number) => Promise<SettlementRecord>;
@@ -1090,7 +1107,15 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     }
   },
 
-  createOrder: async (menuItemId, workerIds, specialRequirements = [], hours) => {
+  createOrder: async (
+    menuItemId,
+    workerIds,
+    specialRequirements = [],
+    hours,
+    customOrderNo,
+    overrideCommissionRate,
+    overrideDiscount,
+  ) => {
     if (get().is_mutating) throw new Error("上一项操作仍在处理中");
     const state = get();
     const menuItem = state.menu.find((item) => item.id === menuItemId);
@@ -1109,6 +1134,14 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     );
     const normalizedRequirements = normalizeSpecialRequirements(specialRequirements);
     const specialTotal = specialRequirementsTotal(normalizedRequirements);
+    const normalizedOverrideCommissionRate = normalizeOptionalPercentage(
+      overrideCommissionRate,
+      "临时抽成",
+    );
+    const normalizedOverrideDiscount = normalizeOptionalPercentage(
+      overrideDiscount,
+      "临时折扣",
+    );
     const orderType = normalizeOrderType(menuItem.order_type);
     const orderHours = orderType === "companion"
       ? normalizeCompanionHours(hours ?? 1)
@@ -1120,9 +1153,12 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       menuItem,
       orderHours ?? 1,
     );
-    const orderOriginalTotal = fromCents(
-      toCents(basePriceSnapshot) + toCents(specialTotal),
+    const discountedTotals = calculateDiscountedOrderTotals(
+      basePriceSnapshot,
+      specialTotal,
+      normalizedOverrideDiscount,
     );
+    const orderOriginalTotal = discountedTotals.totalPrice;
     toCents(orderOriginalTotal);
     const snapshot: OrderPricingSnapshot = {
       service_name: menuItem.service_name,
@@ -1132,11 +1168,16 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       commission_mode: menuItem.commission_mode,
       club_commission_rate: menuItem.club_commission_rate,
       tier_commission_rates: { ...menuItem.tier_commission_rates },
+      override_commission_rate: normalizedOverrideCommissionRate,
       split_type: menuItem.split_type,
       tiered_ratios: menuItem.tiered_ratios,
       payout_weights: payoutWeights,
     };
     calculateSettlement(snapshot, {}, orderOriginalTotal);
+    const createdAt = new Date().toISOString();
+    const normalizedOrderNo = customOrderNo === undefined
+      ? createDefaultOrderNo(createdAt)
+      : normalizeCustomOrderNo(customOrderNo);
     const optimisticId = `optimistic-${Date.now()}`;
     const optimisticPeriodIds = Object.fromEntries(
       selectedWorkers.flatMap((worker) =>
@@ -1166,8 +1207,15 @@ export const useClubStore = create<ClubStore>((set, get) => ({
       special_total: specialTotal,
       total_price: orderOriginalTotal,
       order_original_total: orderOriginalTotal,
-      created_at: new Date().toISOString(),
+      original_total_before_discount: discountedTotals.originalTotalBeforeDiscount,
+      discount_amount: discountedTotals.discountAmount,
+      override_commission_rate: normalizedOverrideCommissionRate,
+      override_discount: discountedTotals.overrideDiscount,
+      custom_order_no: normalizedOrderNo,
+      created_at: createdAt,
+      display_created_at: createdAt,
       completed_at: null,
+      display_completed_at: null,
       pricing_snapshot: snapshot,
       settled: false,
       settlement_id: null,
@@ -1191,9 +1239,67 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         assigned_worker_ids: workerIds,
         special_requirements: normalizedRequirements,
         hours: orderHours,
+        custom_order_no: normalizedOrderNo,
+        override_commission_rate: normalizedOverrideCommissionRate,
+        override_discount: discountedTotals.overrideDiscount,
       });
       set({ ...data, is_mutating: false, last_synced_at: new Date().toISOString() });
       return data.created_order_id ?? optimisticId;
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  updateOrderTimeAndNo: async (orderId, data) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const order = state.orders.find((candidate) => candidate.id === orderId);
+    if (!order) throw new Error("订单不存在");
+    const customOrderNo = normalizeCustomOrderNo(data.custom_order_no);
+    const createdTimestamp = Date.parse(data.display_created_at);
+    const completedTimestamp = data.display_completed_at
+      ? Date.parse(data.display_completed_at)
+      : null;
+    if (!Number.isFinite(createdTimestamp)) throw new Error("下单时间格式无效");
+    if (completedTimestamp !== null && !Number.isFinite(completedTimestamp)) {
+      throw new Error("完成时间格式无效");
+    }
+    const displayCreatedAt = new Date(createdTimestamp).toISOString();
+    const displayCompletedAt = completedTimestamp === null
+      ? null
+      : new Date(completedTimestamp).toISOString();
+    if (displayCompletedAt && Date.parse(displayCompletedAt) < Date.parse(displayCreatedAt)) {
+      throw new Error("完成时间不能早于下单时间");
+    }
+    if (order.status === "completed" && !displayCompletedAt) {
+      throw new Error("已完成订单需要保留完成时间");
+    }
+
+    const previous = clubSnapshot(state);
+    set({
+      orders: state.orders.map((candidate) =>
+        candidate.id === orderId
+          ? {
+              ...candidate,
+              custom_order_no: customOrderNo,
+              display_created_at: displayCreatedAt,
+              display_completed_at: displayCompletedAt,
+            }
+          : candidate,
+      ),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({
+        action: "update_order_presentation",
+        order_id: orderId,
+        custom_order_no: customOrderNo,
+        display_created_at: displayCreatedAt,
+        display_completed_at: displayCompletedAt,
+      });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
     } catch (error) {
       set({ ...previous, is_mutating: false });
       throw error;
@@ -1257,6 +1363,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
               final_club_income: settlement.club_income,
               final_worker_incomes: settlement.worker_incomes,
               completed_at: completedAt,
+              display_completed_at: candidate.display_completed_at ?? completedAt,
             }
           : candidate,
       ),

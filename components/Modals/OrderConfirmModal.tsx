@@ -9,7 +9,7 @@ import {
   useReducedMotion,
   useSpring,
 } from "framer-motion";
-import { Check, Clock3, Minus, Plus, Sparkles, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Clock3, Minus, Plus, SlidersHorizontal, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -22,6 +22,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import type {
   OrderPricingSnapshot,
   PriceMenuItem,
@@ -45,6 +55,13 @@ import {
 } from "@/lib/settlement";
 import { useClubStore } from "@/store/use-club-store";
 import { isWorkerEligibleForMenuItem } from "@/lib/worker-eligibility";
+import {
+  calculateDiscountedOrderTotals,
+  createDefaultOrderNo,
+  fallbackOrderNo,
+  normalizeCustomOrderNo,
+  normalizeOptionalPercentage,
+} from "@/lib/order-presentation";
 
 interface RequirementDraft {
   id: string;
@@ -116,10 +133,16 @@ export function OrderConfirmModal({
 }: OrderConfirmModalProps) {
   const createOrder = useClubStore((state) => state.createOrder);
   const isMutating = useClubStore((state) => state.is_mutating);
-  const [selected, setSelected] = useState<string[]>(initialWorkerIds);
+  const orders = useClubStore((state) => state.orders);
+  const [selected, setSelected] = useState<string[]>(() => initialWorkerIds);
   const [requirements, setRequirements] = useState<RequirementDraft[]>([]);
   const [hoursInput, setHoursInput] = useState("1");
   const [hoursNotice, setHoursNotice] = useState("");
+  const [orderNo, setOrderNo] = useState(() => createDefaultOrderNo());
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [overrideCommissionInput, setOverrideCommissionInput] = useState("");
+  const [overrideDiscountInput, setOverrideDiscountInput] = useState("");
+  const [duplicateConfirmOpen, setDuplicateConfirmOpen] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const orderType = normalizeOrderType(item?.order_type);
 
@@ -160,9 +183,18 @@ export function OrderConfirmModal({
   let validationMessage = "";
   let normalizedRequirements: SpecialRequirement[] = [];
   let preview: ReturnType<typeof calculateSettlement> | null = null;
+  let normalizedOrderNo = "";
+  let overrideCommissionRate: number | null = null;
+  let overrideDiscount: number | null = null;
   let orderHours: number | null = null;
   let basePrice = 0;
   let hoursError = "";
+  let discountedTotals = {
+    overrideDiscount: null as number | null,
+    originalTotalBeforeDiscount: 0,
+    discountAmount: 0,
+    totalPrice: 0,
+  };
   try {
     orderHours = orderType === "companion"
       ? normalizeCompanionHours(hoursInput)
@@ -171,8 +203,24 @@ export function OrderConfirmModal({
   } catch (error) {
     hoursError = error instanceof Error ? error.message : "陪玩时长无效";
   }
+  try {
+    normalizedOrderNo = normalizeCustomOrderNo(orderNo);
+    overrideCommissionRate = normalizeOptionalPercentage(
+      overrideCommissionInput,
+      "临时抽成",
+    );
+    overrideDiscount = normalizeOptionalPercentage(overrideDiscountInput, "临时折扣");
+    discountedTotals = calculateDiscountedOrderTotals(
+      basePrice,
+      liveSpecialTotal,
+      overrideDiscount,
+    );
+  } catch (error) {
+    validationMessage = error instanceof Error ? error.message : "订单信息不完整";
+  }
   if (item) {
     try {
+      if (validationMessage) throw new Error(validationMessage);
       if (hoursError) throw new Error(hoursError);
       if (selectedIds.length !== needed) throw new Error(`请选择 ${needed} 名打手`);
       normalizedRequirements = normalizeSpecialRequirements(
@@ -182,7 +230,11 @@ export function OrderConfirmModal({
         })),
       );
       const specialTotal = specialRequirementsTotal(normalizedRequirements);
-      const originalTotal = fromCents(toCents(basePrice) + toCents(specialTotal));
+      discountedTotals = calculateDiscountedOrderTotals(
+        basePrice,
+        specialTotal,
+        overrideDiscount,
+      );
       const snapshot: OrderPricingSnapshot = {
         service_name: item.service_name,
         order_type: orderType,
@@ -193,6 +245,7 @@ export function OrderConfirmModal({
         tier_commission_rates: {
           ...(item.tier_commission_rates ?? defaultTierCommissionRates()),
         },
+        override_commission_rate: overrideCommissionRate,
         split_type: item.split_type,
         tiered_ratios: item.tiered_ratios,
         payout_weights: buildPayoutWeights(
@@ -201,7 +254,7 @@ export function OrderConfirmModal({
           item.tiered_ratios,
         ),
       };
-      preview = calculateSettlement(snapshot, {}, originalTotal);
+      preview = calculateSettlement(snapshot, {}, discountedTotals.totalPrice);
     } catch (error) {
       validationMessage = error instanceof Error ? error.message : "订单信息不完整";
     }
@@ -227,24 +280,34 @@ export function OrderConfirmModal({
     );
   }
 
-  async function confirm() {
+  async function confirm(allowDuplicate = false) {
     setAttempted(true);
     if (!preview || validationMessage || requirementErrors.some(Boolean)) return;
+    const hasDuplicate = orders.some(
+      (order) => fallbackOrderNo(order) === normalizedOrderNo,
+    );
+    if (hasDuplicate && !allowDuplicate) {
+      setDuplicateConfirmOpen(true);
+      return;
+    }
     try {
       const orderId = await createOrder(
         item!.id,
         selectedIds,
         normalizedRequirements,
         orderHours ?? undefined,
+        normalizedOrderNo,
+        overrideCommissionRate,
+        discountedTotals.overrideDiscount,
       );
-      toast.success(`订单 ${orderId.slice(0, 8)} 已开始`);
+      toast.success(`订单 ${normalizedOrderNo || orderId.slice(0, 8)} 已开始`);
       onOpenChange(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "派单失败");
     }
   }
 
-  const orderTotal = fromCents(toCents(basePrice) + toCents(liveSpecialTotal));
+  const orderTotal = discountedTotals.totalPrice;
 
   function normalizeHoursOnBlur() {
     const raw = Number(hoursInput);
@@ -258,6 +321,7 @@ export function OrderConfirmModal({
   }
 
   return (
+    <>
     <Dialog
       open={open}
       onOpenChange={(next) => {
@@ -295,6 +359,25 @@ export function OrderConfirmModal({
               {orderType === "companion" ? `${formatMoney(item.hourly_rate)} / 小时` : formatMoney(item.base_price)}
             </p>
           </div>
+
+          <section className="rounded-2xl border border-white/[0.08] bg-black/15 p-4">
+            <label htmlFor="custom-order-no" className="text-sm font-semibold text-white/80">
+              订单编号
+            </label>
+            <p className="mt-1 text-xs text-white/35">默认自动生成；支持字母、数字、短横线与下划线。</p>
+            <Input
+              id="custom-order-no"
+              value={orderNo}
+              maxLength={30}
+              placeholder="DF-20250101-8342"
+              onChange={(event) => setOrderNo(event.target.value)}
+              className={`${inputClass} mt-3 font-mono`}
+              aria-invalid={Boolean(validationMessage && !normalizedOrderNo)}
+            />
+            {orders.some((order) => fallbackOrderNo(order) === orderNo.trim()) ? (
+              <p className="mt-2 text-xs text-[#FFB340]">该编号已存在；确认开始时会再次请你确认。</p>
+            ) : null}
+          </section>
 
           <AnimatePresence initial={false}>
             {orderType === "companion" ? (
@@ -352,7 +435,9 @@ export function OrderConfirmModal({
                 <p className="mt-1 text-xs text-white/35">已选择 {selectedIds.length}/{needed}</p>
               </div>
               <span className="rounded-lg bg-[#007AFF]/12 px-2.5 py-1 text-xs text-[#64D2FF]">
-                {item.commission_mode === "by_tier" ? "按所选档位抽成" : "统一抽成"}
+                {overrideCommissionRate !== null
+                  ? `临时抽成 ${overrideCommissionRate}%`
+                  : item.commission_mode === "by_tier" ? "按所选档位抽成" : "统一抽成"}
               </span>
             </div>
             {item.split_type === "tiered" ? (
@@ -370,7 +455,10 @@ export function OrderConfirmModal({
                   !checked &&
                   (selectedIds.length >= needed ||
                     (item.split_type === "tiered" && sameTierSelected));
-                const tierRate = getCommissionRate(item, worker);
+                const tierRate = getCommissionRate(
+                  { ...item, override_commission_rate: overrideCommissionRate },
+                  worker,
+                );
                 return (
                   <label
                     key={worker.id}
@@ -389,7 +477,7 @@ export function OrderConfirmModal({
                     <span className="min-w-0 flex-1">
                       <span className="block truncate font-medium text-white">{worker.name}</span>
                       <span className="mt-1 block text-xs text-white/38">
-                        {item.commission_mode === "by_tier"
+                        {overrideCommissionRate !== null || item.commission_mode === "by_tier"
                           ? `该档抽成 ${tierRate}%`
                           : `累计 ${worker.total_completed_orders} 单`}
                       </span>
@@ -506,6 +594,68 @@ export function OrderConfirmModal({
             ) : null}
           </section>
 
+          <section className="overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.025]">
+            <button
+              type="button"
+              onClick={() => setAdvancedOpen((current) => !current)}
+              className="flex w-full items-center justify-between gap-3 px-4 py-3.5 text-left transition hover:bg-white/[0.045]"
+              aria-expanded={advancedOpen}
+            >
+              <span className="flex items-center gap-2 text-sm font-semibold text-white/75">
+                <SlidersHorizontal className="size-4 text-[#A5A4FF]" />高级选项（临时调整）
+              </span>
+              <motion.span animate={{ rotate: advancedOpen ? 180 : 0 }} transition={{ duration: 0.18 }}>
+                <ChevronDown className="size-4 text-white/38" />
+              </motion.span>
+            </button>
+            <AnimatePresence initial={false}>
+              {advancedOpen ? (
+                <motion.div
+                  initial={{ height: 0, opacity: 0, y: -8 }}
+                  animate={{ height: "auto", opacity: 1, y: 0 }}
+                  exit={{ height: 0, opacity: 0, y: -8 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 28 }}
+                  className="overflow-hidden"
+                >
+                  <div className="grid gap-3 border-t border-white/[0.07] p-4 sm:grid-cols-2">
+                    <div>
+                      <label htmlFor="override-commission" className="text-xs font-medium text-white/55">临时抽成（%）</label>
+                      <Input
+                        id="override-commission"
+                        type="number"
+                        inputMode="decimal"
+                        min="0"
+                        max="100"
+                        step="0.01"
+                        value={overrideCommissionInput}
+                        onChange={(event) => setOverrideCommissionInput(event.target.value)}
+                        placeholder="留空使用默认配置"
+                        className={`${inputClass} mt-2`}
+                      />
+                      <p className="mt-1.5 text-[11px] leading-5 text-white/32">填写后覆盖本单统一/按档位抽成。</p>
+                    </div>
+                    <div>
+                      <label htmlFor="override-discount" className="text-xs font-medium text-white/55">临时折扣（%）</label>
+                      <Input
+                        id="override-discount"
+                        type="number"
+                        inputMode="decimal"
+                        min="0"
+                        max="100"
+                        step="0.01"
+                        value={overrideDiscountInput}
+                        onChange={(event) => setOverrideDiscountInput(event.target.value)}
+                        placeholder="留空不打折，10 表示 9 折"
+                        className={`${inputClass} mt-2`}
+                      />
+                      <p className="mt-1.5 text-[11px] leading-5 text-white/32">折后订单总价会作为本单抽成与工资基数。</p>
+                    </div>
+                  </div>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          </section>
+
           <section className="overflow-hidden rounded-2xl border border-[#007AFF]/20 bg-[#007AFF]/[0.07]">
             <div className="space-y-2 p-4 text-sm">
               {orderType === "companion" ? (
@@ -526,6 +676,22 @@ export function OrderConfirmModal({
               <div className="flex items-center justify-between text-white/50">
                 <span>特殊需求加价</span><span>+{formatMoney(liveSpecialTotal)}</span>
               </div>
+              {discountedTotals.overrideDiscount !== null ? (
+                <>
+                  <div className="flex items-center justify-between text-white/50">
+                    <span>折扣前总价</span><span><RollingMoney value={discountedTotals.originalTotalBeforeDiscount} /></span>
+                  </div>
+                  <div className="flex items-center justify-between text-[#FFB340]">
+                    <span>临时折扣 {discountedTotals.overrideDiscount}%</span>
+                    <span>-<RollingMoney value={discountedTotals.discountAmount} /></span>
+                  </div>
+                </>
+              ) : null}
+              {overrideCommissionRate !== null ? (
+                <div className="flex items-center justify-between text-[#A5A4FF]">
+                  <span>本单临时抽成</span><span>{overrideCommissionRate}%</span>
+                </div>
+              ) : null}
             </div>
             <div className="flex items-end justify-between gap-4 border-t border-[#007AFF]/15 bg-[#007AFF]/[0.06] px-4 py-4">
               <div>
@@ -561,7 +727,7 @@ export function OrderConfirmModal({
             <Button
               type="button"
               disabled={!preview || isMutating || requirementErrors.some(Boolean)}
-              onClick={confirm}
+              onClick={() => void confirm()}
               className="h-11 rounded-xl bg-gradient-to-r from-[#007AFF] to-[#5AC8FA] px-5 text-white shadow-[0_10px_28px_rgba(0,122,255,.24)] hover:brightness-110"
             >
               {isMutating ? (
@@ -574,5 +740,39 @@ export function OrderConfirmModal({
         </motion.div>
       </DialogContent>
     </Dialog>
+    <AlertDialog
+      open={duplicateConfirmOpen}
+      onOpenChange={(next) => !isMutating && setDuplicateConfirmOpen(next)}
+    >
+      <AlertDialogContent className="border-white/10 bg-[#171719]/95 text-white shadow-2xl backdrop-blur-xl">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ type: "spring", stiffness: 300, damping: 27 }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>订单编号已存在</AlertDialogTitle>
+            <AlertDialogDescription className="leading-6 text-white/45">
+              “{normalizedOrderNo}” 已被其他订单使用。编号允许重复，是否仍要继续创建？
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="mt-5">
+            <AlertDialogCancel disabled={isMutating} className="border-white/10 bg-white/[0.04] text-white/65 hover:bg-white/[0.08] hover:text-white">返回修改</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={isMutating}
+              onClick={(event) => {
+                event.preventDefault();
+                setDuplicateConfirmOpen(false);
+                void confirm(true);
+              }}
+              className="bg-[#007AFF] text-white hover:bg-[#1685ff]"
+            >
+              仍要创建
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </motion.div>
+      </AlertDialogContent>
+    </AlertDialog>
+    </>
   );
 }

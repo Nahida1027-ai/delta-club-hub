@@ -22,6 +22,7 @@ import {
   aggregateTransferFees,
   resolveTransferFeeRecords,
 } from "../lib/transfer-fees";
+import { calculateDiscountedOrderTotals } from "../lib/order-presentation";
 
 const zeroTierRates: TierCommissionRates = {
   "1档": 0,
@@ -35,6 +36,7 @@ interface SnapshotOptions {
   tierRates?: TierCommissionRates;
   splitType?: SplitType;
   tieredRatios?: TieredRatios | null;
+  overrideCommissionRate?: number | null;
 }
 
 function snapshot(
@@ -51,6 +53,7 @@ function snapshot(
     commission_mode: options.commissionMode ?? "uniform",
     club_commission_rate: commission,
     tier_commission_rates: options.tierRates ?? zeroTierRates,
+    override_commission_rate: options.overrideCommissionRate ?? null,
     split_type: options.splitType ?? (weights.length === 1 ? "single" : "equal"),
     tiered_ratios: options.tieredRatios ?? null,
     payout_weights: weights,
@@ -70,6 +73,19 @@ const worker = (
 });
 
 const cases = [
+  {
+    name: "临时抽成: 覆盖按档位抽成且打赏不参与抽成",
+    result: calculateSettlement(
+      snapshot(100, 0, [worker("A", 100)], {
+        commissionMode: "by_tier",
+        tierRates: { "1档": 10, "2档": 20, "3档": 0, "娱乐陪玩": 0 },
+        overrideCommissionRate: 25,
+      }),
+      { A: 10 },
+      117,
+    ),
+    expected: { club: 29.25, workers: [97.75] },
+  },
   {
     name: "single: 个人打赏免抽成",
     result: calculateSettlement(snapshot(200, 30, [worker("A", 100)]), { A: 20 }),
@@ -346,6 +362,22 @@ assert.equal(
   150,
   "陪玩单基础价必须等于小时价乘时长",
 );
+const discountedOrder = calculateDiscountedOrderTotals(100, 30, 10);
+assert.deepEqual(
+  discountedOrder,
+  {
+    overrideDiscount: 10,
+    originalTotalBeforeDiscount: 130,
+    discountAmount: 13,
+    totalPrice: 117,
+  },
+  "临时折扣必须先作用于基础价和特殊需求总和，并以折后价作为工资结算基数",
+);
+assert.equal(
+  calculateDiscountedOrderTotals(100, 30, 100).totalPrice,
+  0,
+  "100% 临时折扣必须保留合法的 0 元订单总价",
+);
 assert.equal(
   calculateOrderBasePrice(
     { order_type: "escort", base_price: 200, hourly_rate: 0 },
@@ -397,5 +429,5 @@ assert.deepEqual(
 );
 
 console.log(
-  `Settlement verification passed: ${cases.length} settlement scenarios + 13 validation assertions.`,
+  `Settlement verification passed: ${cases.length} settlement scenarios + 15 validation assertions.`,
 );

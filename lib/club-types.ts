@@ -113,6 +113,8 @@ export interface OrderPricingSnapshot {
   commission_mode: CommissionMode;
   club_commission_rate: number;
   tier_commission_rates: TierCommissionRates;
+  /** 本单临时统一抽成；有值时覆盖价格表的统一/按档位抽成配置。 */
+  override_commission_rate?: number | null;
   split_type: SplitType;
   tiered_ratios: TieredRatios | null;
   payout_weights: PayoutWeight[];
@@ -148,6 +150,8 @@ export interface TransferFeeRecord {
 
 export interface Order {
   id: string;
+  /** 用户可读订单编号；旧数据缺失时由展示层按原始时间回退生成。 */
+  custom_order_no?: string;
   menu_item_id: string;
   assigned_worker_ids: string[];
   /** 历史订单缺失时按 escort 读取。 */
@@ -181,8 +185,21 @@ export interface Order {
   special_total: number;
   total_price: number;
   order_original_total: number;
+  /** 折扣前的基础价与特殊需求合计。 */
+  original_total_before_discount?: number;
+  /** 本单临时折扣减免金额。 */
+  discount_amount?: number;
+  /** null 表示沿用价格表快照；有值时本单所有打手使用该统一抽成。 */
+  override_commission_rate?: number | null;
+  /** null 表示未使用临时折扣；0–100 表示减免百分比。 */
+  override_discount?: number | null;
+  /** 不可修改的原始创建时间，始终作为工资结算周期归属依据。 */
   created_at: string;
+  /** 管理员可调整的展示下单时间，不影响工资结算归属。 */
+  display_created_at?: string;
   completed_at: string | null;
+  /** 管理员可调整的展示完成时间，不影响工资结算归属。 */
+  display_completed_at?: string | null;
   pricing_snapshot: OrderPricingSnapshot;
   /** 所有参与打手都已归入工资结算记录后才为 true。 */
   settled: boolean;

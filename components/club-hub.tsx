@@ -16,7 +16,6 @@ import {
   ChevronDown,
   ChevronRight,
   CircleDollarSign,
-  Clock3,
   Coins,
   Gauge,
   History,
@@ -35,10 +34,10 @@ import {
   WalletCards,
 } from "lucide-react";
 import {
-  Bar,
-  BarChart,
   CartesianGrid,
   Cell,
+  Line,
+  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -50,10 +49,12 @@ import { toast } from "sonner";
 import { AddServiceModal } from "@/components/Modals/AddServiceModal";
 import { AddWorkerModal } from "@/components/Modals/AddWorkerModal";
 import { EditServiceModal } from "@/components/Modals/EditServiceModal";
+import { EditOrderPresentationModal } from "@/components/Modals/EditOrderPresentationModal";
 import { OrderConfirmModal } from "@/components/Modals/OrderConfirmModal";
 import { ReassignOrderModal } from "@/components/Modals/ReassignOrderModal";
 import { SortableHandle, SortableList } from "@/components/dnd/SortableList";
 import { ExportDataButton } from "@/components/exports/ExportDataButton";
+import { TimeRangeSelector } from "@/components/filters/TimeRangeSelector";
 import { ServiceFolderBoard } from "@/components/folders/ServiceFolderBoard";
 import { PayrollSettlementPanel } from "@/components/settlements/PayrollSettlementPanel";
 import { GenderSegmentedControl, WorkerGenderBadge } from "@/components/workers/WorkerGender";
@@ -129,6 +130,17 @@ import {
   workerOrderEarningForOrder,
 } from "@/lib/order-earnings";
 import { aggregateTransferFees } from "@/lib/transfer-fees";
+import {
+  displayCompletedAt,
+  displayCreatedAt,
+  fallbackOrderNo,
+} from "@/lib/order-presentation";
+import {
+  ALL_TIME_RANGE,
+  matchesTimeRange,
+  timeRangeLabel,
+  type TimeRangeFilter,
+} from "@/lib/time-range";
 
 const glassCard =
   "rounded-[22px] border border-white/[0.08] bg-[#1c1c1e]/75 shadow-[0_18px_50px_rgba(0,0,0,0.22)] backdrop-blur-md";
@@ -168,15 +180,6 @@ function chinaDateParts(iso: string) {
     day: "2-digit",
   }).formatToParts(new Date(iso));
   return Object.fromEntries(values.map((part) => [part.type, part.value]));
-}
-
-function monthKey(iso = new Date().toISOString()) {
-  const parts = chinaDateParts(iso);
-  return `${parts.year}-${parts.month}`;
-}
-
-function inMonth(iso: string | null, selectedMonth: string) {
-  return Boolean(iso && monthKey(iso) === selectedMonth);
 }
 
 function formatDateTime(iso: string | null) {
@@ -305,35 +308,22 @@ function MetricCard({
   );
 }
 
-function MonthPicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return (
-    <label className="flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.05] px-3 text-sm text-white/55">
-      <Clock3 className="size-4 text-[#64D2FF]" />
-      <span className="sr-only">选择结算月份</span>
-      <input
-        type="month"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="min-w-0 bg-transparent font-medium text-white outline-none [color-scheme:dark]"
-      />
-    </label>
-  );
-}
-
 function Dashboard({
   workers,
   orders,
-  selectedMonth,
-  onMonthChange,
+  timeRange,
+  onTimeRangeChange,
 }: {
   workers: Worker[];
   orders: Order[];
-  selectedMonth: string;
-  onMonthChange: (value: string) => void;
+  timeRange: TimeRangeFilter;
+  onTimeRangeChange: (value: TimeRangeFilter) => void;
 }) {
   const completed = useMemo(
-    () => orders.filter((order) => order.status === "completed" && inMonth(order.completed_at, selectedMonth)),
-    [orders, selectedMonth],
+    () => orders.filter(
+      (order) => order.status === "completed" && matchesTimeRange(order.created_at, timeRange),
+    ),
+    [orders, timeRange],
   );
   const clubIncome = completed.reduce((sum, order) => sum + (order.final_club_income ?? 0), 0);
   const orderWageExpense = completed.reduce(
@@ -345,14 +335,15 @@ function Dashboard({
     0,
   );
   const workerExpense = orderWageExpense + tipExpense;
-  const [year, month] = selectedMonth.split("-").map(Number);
-  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  const dailyData = Array.from({ length: daysInMonth }, (_, index) => ({
-    day: `${index + 1}日`,
-    amount: completed
-      .filter((order) => Number(chinaDateParts(order.completed_at!).day) === index + 1)
-      .reduce((sum, order) => sum + (order.final_club_income ?? 0), 0),
-  }));
+  const dailyData = [...completed.reduce((byDay, order) => {
+    const parts = chinaDateParts(order.created_at);
+    const day = `${parts.year}-${parts.month}-${parts.day}`;
+    byDay.set(day, (byDay.get(day) ?? 0) + (order.final_club_income ?? 0));
+    return byDay;
+  }, new Map<string, number>())]
+    .sort(([first], [second]) => first.localeCompare(second))
+    .map(([day, amount]) => ({ day: day.slice(5).replace("-", "/"), amount }));
+  const rangeLabel = timeRangeLabel(timeRange);
   const workerData = workers
     .map((worker) => {
       const relevant = completed.filter((order) => order.assigned_worker_ids.includes(worker.id));
@@ -387,17 +378,17 @@ function Dashboard({
   return (
     <div className="space-y-8">
       <SectionTitle
-        eyebrow="MONTHLY PULSE"
-        title="本月经营总览"
-        detail="账目按订单完成时间归档；进行中的订单不会提前计入收入。"
-        action={<MonthPicker value={selectedMonth} onChange={onMonthChange} />}
+        eyebrow="OPERATIONS PULSE"
+        title={`${rangeLabel}经营总览`}
+        detail="图表与汇总按订单原始创建时间筛选，展示时间修改不会改变工资结算归属；进行中的订单不会提前计入收入。"
+        action={<TimeRangeSelector value={timeRange} onChange={onTimeRangeChange} />}
       />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <MetricCard label="俱乐部总抽成" value={clubIncome} icon={CircleDollarSign} note="打赏不参与抽成" />
+        <MetricCard label="俱乐部总抽成" value={clubIncome} icon={CircleDollarSign} note={`${rangeLabel}已完成订单，打赏不参与抽成`} />
         <MetricCard label="订单工资支出" value={orderWageExpense} icon={WalletCards} tone="violet" note="进入工资结算周期" />
         <MetricCard label="即时打赏支出" value={tipExpense} icon={Sparkles} tone="orange" note="直接到账，不进周期" />
-        <MetricCard label="本月净利润" value={clubIncome} icon={Gauge} tone="green" note="当前未计运营成本" />
+        <MetricCard label="净利润" value={clubIncome} icon={Gauge} tone="green" note="当前未计运营成本" />
         <MetricCard label="完成订单" value={completed.length} icon={ShieldCheck} tone="orange" money={false} note={`${orders.filter((order) => order.status === "active").length} 单正在进行`} />
       </div>
 
@@ -406,13 +397,13 @@ function Dashboard({
           <div className="mb-6 flex items-start justify-between gap-3">
             <div>
               <h3 className="text-lg font-semibold text-white">每日抽成走势</h3>
-              <p className="mt-1 text-sm text-white/40">{selectedMonth.replace("-", " 年 ")} 月每日入账</p>
+              <p className="mt-1 text-sm text-white/40">{rangeLabel}订单按原始创建日期聚合</p>
             </div>
             <Badge className="border-[#007AFF]/25 bg-[#007AFF]/10 text-[#64D2FF]">俱乐部收入</Badge>
           </div>
           <div className="h-[270px] w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={dailyData} margin={{ top: 8, right: 4, left: -18, bottom: 0 }}>
+              <LineChart data={dailyData} margin={{ top: 8, right: 4, left: -18, bottom: 0 }}>
                 <defs>
                   <linearGradient id="clubBar" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="#64D2FF" />
@@ -420,18 +411,18 @@ function Dashboard({
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} stroke="rgba(255,255,255,.065)" />
-                <XAxis dataKey="day" axisLine={false} tickLine={false} tick={{ fill: "rgba(255,255,255,.38)", fontSize: 12 }} interval={Math.max(0, Math.floor(daysInMonth / 8) - 1)} />
+                <XAxis dataKey="day" axisLine={false} tickLine={false} tick={{ fill: "rgba(255,255,255,.38)", fontSize: 12 }} interval={Math.max(0, Math.floor(dailyData.length / 8) - 1)} />
                 <YAxis axisLine={false} tickLine={false} tick={{ fill: "rgba(255,255,255,.38)", fontSize: 12 }} tickFormatter={(value) => `¥${value}`} />
                 <RechartsTooltip cursor={{ fill: "rgba(255,255,255,.035)" }} contentStyle={{ background: "rgba(28,28,30,.96)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 14, color: "white" }} formatter={(value) => [formatMoney(Number(value)), "俱乐部抽成"]} />
-                <Bar dataKey="amount" fill="url(#clubBar)" radius={[5, 5, 2, 2]} maxBarSize={16} animationDuration={700} />
-              </BarChart>
+                <Line type="monotone" dataKey="amount" stroke="#64D2FF" strokeWidth={3} dot={{ r: 3, fill: "#007AFF", strokeWidth: 0 }} activeDot={{ r: 5 }} animationDuration={700} />
+              </LineChart>
             </ResponsiveContainer>
           </div>
         </article>
 
         <article className={`${glassCard} min-h-[360px] p-5 sm:p-6`}>
           <h3 className="text-lg font-semibold text-white">打手收入构成</h3>
-          <p className="mt-1 text-sm text-white/40">按本月已完成订单实付金额</p>
+            <p className="mt-1 text-sm text-white/40">按{rangeLabel}已完成订单实付金额</p>
           {pieData.length ? (
             <div className="mt-4 grid items-center gap-4 sm:grid-cols-[180px_1fr] xl:grid-cols-1 2xl:grid-cols-[180px_1fr]">
               <div className="relative mx-auto h-[190px] w-[190px]">
@@ -463,7 +454,7 @@ function Dashboard({
           ) : (
             <div className="grid h-[245px] place-content-center text-center text-white/35">
               <BarChart3 className="mx-auto mb-3 size-8" />
-              <p className="text-sm">这个月还没有已结算订单</p>
+              <p className="text-sm">该时间范围内还没有已结算订单</p>
             </div>
           )}
         </article>
@@ -473,7 +464,7 @@ function Dashboard({
         <div className="flex items-center justify-between border-b border-white/[0.07] px-5 py-4 sm:px-6">
           <div>
             <h3 className="text-lg font-semibold text-white">打手个人业绩</h3>
-            <p className="mt-1 text-sm text-white/40">本月完成单数与实际收入</p>
+            <p className="mt-1 text-sm text-white/40">{rangeLabel}完成单数与实际收入</p>
           </div>
           <Users className="size-5 text-[#64D2FF]" />
         </div>
@@ -485,7 +476,7 @@ function Dashboard({
               <TableHead className="text-right text-white/40">完成单数</TableHead>
               <TableHead className="text-right text-white/40">订单工资</TableHead>
               <TableHead className="text-right text-white/40">即时打赏</TableHead>
-              <TableHead className="pr-5 text-right text-white/40 sm:pr-6">本月总收入</TableHead>
+               <TableHead className="pr-5 text-right text-white/40 sm:pr-6">总收入</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -576,6 +567,7 @@ function OrderDesk({
     item: PriceMenuItem;
     initialWorkerIds: string[];
   } | null>(null);
+  const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const activeOrders = orders.filter((order) => order.status === "active");
 
   return (
@@ -642,7 +634,7 @@ function OrderDesk({
                 <div>
                   <p className="font-medium text-white">{order.pricing_snapshot.service_name}</p>
                   <p className="mt-1 text-sm text-white/38">
-                    #{order.id.slice(0, 8)} · {formatDateTime(order.created_at)} · {formatMoney(order.total_price)}
+                    {fallbackOrderNo(order)} · {formatDateTime(displayCreatedAt(order))} · {formatMoney(order.total_price)}
                   </p>
                   {order.order_type === "companion" || order.special_requirements.length ? (
                     <div className="mt-2 flex flex-wrap gap-1.5">
@@ -667,7 +659,18 @@ function OrderDesk({
                 <div className="flex flex-wrap gap-2">
                   {order.assigned_worker_ids.map((id) => <Badge key={id} className="border-white/10 bg-white/[0.055] text-white/65">{workerName(workers, id, order)}</Badge>)}
                 </div>
-                <span className="flex items-center gap-2 text-sm text-[#FF6961]"><span className="status-dot" data-status="busy" />执行中</span>
+                <div className="flex items-center gap-2">
+                  <span className="flex items-center gap-2 text-sm text-[#FF6961]"><span className="status-dot" data-status="busy" />执行中</span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={isMutating}
+                    onClick={() => setEditingOrder(order)}
+                    className="h-9 rounded-xl border-[#007AFF]/25 bg-[#007AFF]/10 text-[#64D2FF] hover:bg-[#007AFF]/20 hover:text-white"
+                  >
+                    <PencilLine className="size-3.5" />编辑
+                  </Button>
+                </div>
               </div>
             ))}
           </div>
@@ -683,6 +686,12 @@ function OrderDesk({
         initialWorkerIds={confirmation?.initialWorkerIds ?? []}
         open={Boolean(confirmation)}
         onOpenChange={(open) => !open && setConfirmation(null)}
+      />
+      <EditOrderPresentationModal
+        key={editingOrder?.id ?? "closed"}
+        order={editingOrder}
+        open={Boolean(editingOrder)}
+        onOpenChange={(open) => !open && setEditingOrder(null)}
       />
     </div>
   );
@@ -868,7 +877,7 @@ function WorkerBoard({ workers, orders, menu }: { workers: Worker[]; orders: Ord
                     >
                       <div className="rounded-xl border border-[#FF453A]/15 bg-[#FF453A]/[0.055] p-3">
                         <p className="truncate text-sm font-medium text-white/85">{activeOrder.pricing_snapshot.service_name}</p>
-                        <p className="mt-1 text-[12px] text-white/35">订单 #{activeOrder.id.slice(0, 8)}</p>
+                        <p className="mt-1 text-[12px] text-white/35">订单 {fallbackOrderNo(activeOrder)} · {formatDateTime(displayCreatedAt(activeOrder))}</p>
                         {activeOrder.order_type === "companion" || activeOrder.special_requirements.length || workerTransferFee > 0 ? (
                           <div className="mt-2 flex flex-wrap gap-1.5">
                             {activeOrder.order_type === "companion" ? (
@@ -1259,7 +1268,7 @@ function FinishOrderDialog({
   async function confirm() {
     if (!preview) return;
     try {
-      const result = await finishOrder(order!.id, tipsByWorker);
+      await finishOrder(order!.id, tipsByWorker);
       toast.success(`订单工资 ${formatMoney(orderWageTotal)} 已进周期，打赏 ${formatMoney(totalTip)} 已即时到账`);
       onOpenChange(false);
     } catch (error) {
@@ -1525,11 +1534,13 @@ function OrderHistoryItem({
   workers,
   isMutating,
   onDelete,
+  onEdit,
 }: {
   order: Order;
   workers: Worker[];
   isMutating: boolean;
   onDelete: (order: Order) => void;
+  onEdit: (order: Order) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const orderType = normalizeOrderType(order.order_type ?? order.pricing_snapshot.order_type);
@@ -1540,7 +1551,10 @@ function OrderHistoryItem({
     ? aggregateTransferFees(transferFees)
     : order.transfer_fees_by_worker ?? {};
   const totalTip = totalEarningsMap(tipsByWorker);
-  const commissionText = order.pricing_snapshot.commission_mode === "by_tier"
+  const appliedOverrideCommission = order.override_commission_rate ?? order.pricing_snapshot.override_commission_rate;
+  const commissionText = appliedOverrideCommission !== null && appliedOverrideCommission !== undefined
+    ? `临时统一抽成 ${appliedOverrideCommission}%`
+    : order.pricing_snapshot.commission_mode === "by_tier"
     ? `档位抽成 1档 ${order.pricing_snapshot.tier_commission_rates["1档"]}% / 2档 ${order.pricing_snapshot.tier_commission_rates["2档"]}% / 3档 ${order.pricing_snapshot.tier_commission_rates["3档"]}% / 娱乐 ${order.pricing_snapshot.tier_commission_rates["娱乐陪玩"] ?? 0}%`
     : `统一抽成 ${order.pricing_snapshot.club_commission_rate}%`;
 
@@ -1554,8 +1568,14 @@ function OrderHistoryItem({
       className="border-b border-white/[0.06] align-top transition-colors hover:bg-white/[0.025]"
     >
       <TableCell className="px-5 py-4 sm:px-6">
-        <p className="font-mono text-[13px] text-white/65">#{order.id.slice(0, 8)}</p>
-        <p className="mt-1 text-[12px] text-white/32">{formatDateTime(order.completed_at)}</p>
+        <p className="font-mono text-[13px] text-white/65">{fallbackOrderNo(order)}</p>
+        <p className="mt-1 text-[12px] text-white/32">
+          {order.status === "completed" ? "完成 " : "下单 "}
+          {formatDateTime(order.status === "completed" ? displayCompletedAt(order) : displayCreatedAt(order))}
+        </p>
+        <Badge className={`mt-2 ${order.status === "completed" ? "border-[#30D158]/20 bg-[#30D158]/10 text-[#5FE778]" : "border-[#FF453A]/20 bg-[#FF453A]/10 text-[#FF9A94]"}`}>
+          {order.status === "completed" ? "已完成" : "进行中"}
+        </Badge>
       </TableCell>
       <TableCell className="min-w-72 py-4">
         <button
@@ -1591,6 +1611,9 @@ function OrderHistoryItem({
               <div className="mt-3 rounded-xl border border-white/[0.07] bg-black/20 p-3 text-xs">
                 <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-white/48">
                   <span>订单类型</span><span className={`text-right ${orderType === "companion" ? "text-[#7EF29A]" : "text-[#64D2FF]"}`}>{orderTypeLabel(orderType)}</span>
+                  <span>订单编号</span><span className="text-right font-mono text-white/75">{fallbackOrderNo(order)}</span>
+                  <span>展示下单时间</span><span className="text-right text-white/75">{formatDateTime(displayCreatedAt(order))}</span>
+                  <span>展示完成时间</span><span className="text-right text-white/75">{formatDateTime(displayCompletedAt(order))}</span>
                   {orderType === "companion" ? (
                     <>
                       <span>每小时价格 × 时长</span>
@@ -1599,7 +1622,16 @@ function OrderHistoryItem({
                   ) : null}
                   <span>基础价格</span><span className="text-right text-white/75">{formatMoney(order.base_price_snapshot)}</span>
                   <span>特殊需求加价</span><span className="text-right text-[#C4C3FF]">+{formatMoney(order.special_total)}</span>
+                  {(order.override_discount ?? null) !== null ? (
+                    <>
+                      <span>折扣前总价</span><span className="text-right text-white/75">{formatMoney(order.original_total_before_discount ?? (order.base_price_snapshot + order.special_total))}</span>
+                      <span>临时折扣 {order.override_discount}%</span><span className="text-right text-[#FFB340]">-{formatMoney(order.discount_amount ?? 0)}</span>
+                    </>
+                  ) : null}
                   <span>订单总价</span><span className="text-right font-medium text-white">{formatMoney(order.total_price)}</span>
+                  {appliedOverrideCommission !== null && appliedOverrideCommission !== undefined ? (
+                    <><span>临时抽成</span><span className="text-right text-[#A5A4FF]">{appliedOverrideCommission}%（覆盖默认配置）</span></>
+                  ) : null}
                   {transferFees.length ? (
                     <div className="col-span-2 mt-1 border-t border-white/[0.06] pt-2">
                       <p className="mb-2 text-white/40">转单费明细（工资属性）</p>
@@ -1688,15 +1720,28 @@ function OrderHistoryItem({
       <TableCell className="py-4 text-right text-white/65">{formatMoney(totalTip)}</TableCell>
       <TableCell className="py-4 text-right font-semibold text-[#64D2FF]">{formatMoney(order.final_club_income ?? 0)}</TableCell>
       <TableCell className="py-4 pr-5 text-right sm:pr-6">
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={isMutating}
-          onClick={() => onDelete(order)}
-          className={`h-9 rounded-xl ${dangerButtonClass}`}
-        >
-          <Trash2 className="size-3.5" />删除
-        </Button>
+        <div className="flex justify-end gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isMutating}
+            onClick={() => onEdit(order)}
+            className="h-9 rounded-xl border-[#007AFF]/25 bg-[#007AFF]/10 text-[#64D2FF] hover:bg-[#007AFF]/20 hover:text-white"
+          >
+            <PencilLine className="size-3.5" />编辑
+          </Button>
+          {order.status === "completed" ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isMutating}
+              onClick={() => onDelete(order)}
+              className={`h-9 rounded-xl ${dangerButtonClass}`}
+            >
+              <Trash2 className="size-3.5" />删除
+            </Button>
+          ) : null}
+        </div>
       </TableCell>
     </motion.tr>
   );
@@ -1705,20 +1750,35 @@ function OrderHistoryItem({
 function HistoryPanel({
   workers,
   orders,
-  selectedMonth,
-  onMonthChange,
+  timeRange,
+  onTimeRangeChange,
 }: {
   workers: Worker[];
   orders: Order[];
-  selectedMonth: string;
-  onMonthChange: (value: string) => void;
+  timeRange: TimeRangeFilter;
+  onTimeRangeChange: (value: TimeRangeFilter) => void;
 }) {
   const deleteHistoricalOrder = useClubStore((state) => state.deleteHistoricalOrder);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [deletingOrder, setDeletingOrder] = useState<Order | null>(null);
+  const [editingOrder, setEditingOrder] = useState<Order | null>(null);
+  const [search, setSearch] = useState("");
   const completed = orders.filter(
-    (order) => order.status === "completed" && inMonth(order.completed_at, selectedMonth),
+    (order) => order.status === "completed" && matchesTimeRange(order.created_at, timeRange),
   );
+  const visibleOrders = orders
+    .filter((order) => matchesTimeRange(displayCreatedAt(order), timeRange))
+    .filter((order) => {
+      const needle = search.trim().toLowerCase();
+      if (!needle) return true;
+      const people = order.assigned_worker_ids.map((id) => workerName(workers, id, order)).join(" ");
+      return [fallbackOrderNo(order), order.pricing_snapshot.service_name, people]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle);
+    })
+    .sort((first, second) => Date.parse(displayCreatedAt(second)) - Date.parse(displayCreatedAt(first)));
+  const rangeLabel = timeRangeLabel(timeRange);
   const clubIncome = completed.reduce((sum, order) => sum + (order.final_club_income ?? 0), 0);
   const orderWageExpense = completed.reduce(
     (sum, order) => sum + totalEarningsMap(resolveWorkerOrderEarnings(order)),
@@ -1744,21 +1804,35 @@ function HistoryPanel({
     <div className="space-y-8">
       <SectionTitle
         eyebrow="LEDGER"
-        title="订单与月底结算"
-        detail="所有已完成订单永久归档；月报直接汇总订单最终落账字段，不按当前价格表重算。"
-        action={<MonthPicker value={selectedMonth} onChange={onMonthChange} />}
+        title="订单与经营账本"
+        detail="列表按可编辑的展示下单时间排序；财务汇总与工资结算仍严格使用订单原始创建时间。"
+        action={<TimeRangeSelector value={timeRange} onChange={onTimeRangeChange} />}
       />
       <div className="grid gap-4 sm:grid-cols-3">
-        <MetricCard label="俱乐部入账" value={clubIncome} icon={CircleDollarSign} note={`${completed.length} 张已完成订单`} />
+        <MetricCard label="俱乐部入账" value={clubIncome} icon={CircleDollarSign} note={`${rangeLabel} ${completed.length} 张已完成订单`} />
         <MetricCard label="订单工资" value={orderWageExpense} icon={WalletCards} tone="violet" note="进入工资结算周期" />
         <MetricCard label="即时打赏" value={tips} icon={Sparkles} tone="orange" note="已直接归打手，不进周期" />
       </div>
       <article className={`${glassCard} overflow-hidden`}>
-        {completed.length ? (
+        <div className="flex flex-col gap-3 border-b border-white/[0.07] px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          <div>
+            <h3 className="text-lg font-semibold text-white">全部订单</h3>
+            <p className="mt-1 text-sm text-white/40">进行中与已完成订单均可查看；默认按展示下单时间倒序。</p>
+          </div>
+          <div className="relative w-full sm:w-72">
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="搜索订单编号、服务或打手"
+              className={`${inputClass} h-10`}
+            />
+          </div>
+        </div>
+        {visibleOrders.length ? (
           <Table>
             <TableHeader>
               <TableRow className="border-white/[0.07] hover:bg-transparent">
-                <TableHead className="h-12 px-5 text-white/40 sm:px-6">订单 / 完成时间</TableHead>
+                <TableHead className="h-12 px-5 text-white/40 sm:px-6">订单 / 展示时间</TableHead>
                 <TableHead className="text-white/40">服务与规则</TableHead>
                 <TableHead className="text-white/40">打手实得</TableHead>
                 <TableHead className="text-right text-white/40">打赏</TableHead>
@@ -1768,13 +1842,14 @@ function HistoryPanel({
             </TableHeader>
             <TableBody>
               <AnimatePresence initial={false} mode="popLayout">
-                {completed.map((order) => (
+                {visibleOrders.map((order) => (
                   <OrderHistoryItem
                     key={order.id}
                     order={order}
                     workers={workers}
                     isMutating={isMutating}
                     onDelete={setDeletingOrder}
+                    onEdit={setEditingOrder}
                   />
                 ))}
               </AnimatePresence>
@@ -1783,7 +1858,7 @@ function HistoryPanel({
         ) : (
           <div className="grid min-h-60 place-content-center text-center">
             <History className="mx-auto mb-3 size-8 text-white/25" />
-            <p className="text-sm text-white/38">这个月还没有已完成订单</p>
+            <p className="text-sm text-white/38">该时间范围内没有订单</p>
           </div>
         )}
       </article>
@@ -1796,6 +1871,12 @@ function HistoryPanel({
         isMutating={isMutating}
         onOpenChange={(open) => !open && setDeletingOrder(null)}
         onConfirm={confirmDeleteOrder}
+      />
+      <EditOrderPresentationModal
+        key={editingOrder?.id ?? "closed"}
+        order={editingOrder}
+        open={Boolean(editingOrder)}
+        onOpenChange={(open) => !open && setEditingOrder(null)}
       />
     </div>
   );
@@ -1832,7 +1913,7 @@ export function ClubHub() {
   const error = useClubStore((state) => state.error);
   const lastSyncedAt = useClubStore((state) => state.last_synced_at);
   const load = useClubStore((state) => state.load);
-  const [selectedMonth, setSelectedMonth] = useState(() => monthKey());
+  const [timeRange, setTimeRange] = useState<TimeRangeFilter>(() => ({ ...ALL_TIME_RANGE }));
   const [tab, setTab] = useState("dashboard");
 
   useEffect(() => {
@@ -1892,11 +1973,11 @@ export function ClubHub() {
           </div>
         ) : null}
 
-        <TabsContent value="dashboard" className="pt-8"><Dashboard workers={workers} orders={orders} selectedMonth={selectedMonth} onMonthChange={setSelectedMonth} /></TabsContent>
+        <TabsContent value="dashboard" className="pt-8"><Dashboard workers={workers} orders={orders} timeRange={timeRange} onTimeRangeChange={setTimeRange} /></TabsContent>
         <TabsContent value="orders" className="pt-8"><OrderDesk menu={menu} folders={folders} workers={workers} orders={orders} /></TabsContent>
         <TabsContent value="workers" className="pt-8"><WorkerBoard workers={workers} orders={orders} menu={menu} /></TabsContent>
         <TabsContent value="pricing" className="pt-8"><PriceMenuPanel menu={menu} folders={folders} /></TabsContent>
-        <TabsContent value="history" className="pt-8"><HistoryPanel workers={workers} orders={orders} selectedMonth={selectedMonth} onMonthChange={setSelectedMonth} /></TabsContent>
+        <TabsContent value="history" className="pt-8"><HistoryPanel workers={workers} orders={orders} timeRange={timeRange} onTimeRangeChange={setTimeRange} /></TabsContent>
         <TabsContent value="payroll" className="pt-8"><PayrollSettlementPanel /></TabsContent>
       </Tabs>
     </main>

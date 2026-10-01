@@ -80,6 +80,12 @@ export const orders = sqliteTable(
     specialTotalCents: integer("special_total_cents").notNull().default(0),
     totalPriceCents: integer("total_price_cents").notNull().default(0),
     orderOriginalTotalCents: integer("order_original_total_cents").notNull().default(0),
+    originalTotalBeforeDiscountCents: integer("original_total_before_discount_cents")
+      .notNull()
+      .default(0),
+    discountAmountCents: integer("discount_amount_cents").notNull().default(0),
+    overrideCommissionBps: integer("override_commission_bps"),
+    overrideDiscountBps: integer("override_discount_bps"),
     pricingSnapshotJson: text("pricing_snapshot_json").notNull(),
     settlementToken: text("settlement_token"),
     settled: integer("settled").notNull().default(0),
@@ -91,12 +97,16 @@ export const orders = sqliteTable(
     settlementPeriodIdsByWorkerJson: text("settlement_period_ids_by_worker_json")
       .notNull()
       .default("{}"),
+    customOrderNo: text("custom_order_no").notNull().default(""),
     createdAt: text("created_at").notNull(),
+    displayCreatedAt: text("display_created_at"),
     completedAt: text("completed_at"),
+    displayCompletedAt: text("display_completed_at"),
   },
   (table) => [
     index("idx_orders_status").on(table.status),
     index("idx_orders_completed_at").on(table.completedAt),
+    index("idx_orders_display_created_at").on(table.displayCreatedAt),
   ],
 );
 

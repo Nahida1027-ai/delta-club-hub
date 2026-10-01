@@ -3,7 +3,6 @@ import type {
   Folder,
   Order,
   PriceMenuItem,
-  SettlementRecord,
   Worker,
 } from "@/lib/club-types";
 import { isSettlementOverdue } from "@/lib/payroll-settlement";
@@ -16,6 +15,11 @@ import {
   resolveWorkerTipEarnings,
   totalEarningsMap,
 } from "@/lib/order-earnings";
+import {
+  displayCompletedAt,
+  displayCreatedAt,
+  fallbackOrderNo,
+} from "@/lib/order-presentation";
 
 type ExportCell = string | number | boolean;
 
@@ -173,6 +177,10 @@ function specialRequirementsText(order: Order): string {
 function pricingSnapshotText(item: PriceMenuItem | undefined, order: Order): string {
   const snapshot = order.pricing_snapshot;
   if (!snapshot) return "";
+  const override = order.override_commission_rate ?? snapshot.override_commission_rate;
+  if (override !== null && override !== undefined) {
+    return `本单临时统一抽成：${safeNumber(override)}%（覆盖默认配置）`;
+  }
   if (snapshot.commission_mode === "by_tier") {
     const rates = snapshot.tier_commission_rates ?? item?.tier_commission_rates;
     return `按档位抽成：1档 ${safeNumber(rates?.["1档"])}%；2档 ${safeNumber(rates?.["2档"])}%；3档 ${safeNumber(rates?.["3档"])}%；娱乐陪玩 ${safeNumber(rates?.["娱乐陪玩"])}%`;
@@ -306,21 +314,30 @@ export function buildClubExportWorkbookData(
       .map((entry) => `${formatExcelDateTime(entry.changed_at)} ${entry.old_worker_name} → ${entry.new_worker_name}，转单费 ${displayMoney(entry.transfer_fee)}`)
       .join("; ");
     const orderType = normalizeOrderType(order.order_type);
+    const appliedOverrideCommission = order.override_commission_rate
+      ?? order.pricing_snapshot?.override_commission_rate
+      ?? null;
     return [
       order.id,
+      fallbackOrderNo(order),
       order.menu_item_id ?? "",
       order.pricing_snapshot?.service_name ?? item?.service_name ?? "-",
       orderType === "companion" ? "陪玩单" : "护航单",
       orderType === "companion" ? safeNumber(order.hours, 1) : "",
       orderType === "companion" ? roundMoney(safeNumber(order.hourly_rate_snapshot)) : "",
+      formatExcelDateTime(displayCreatedAt(order)),
+      formatExcelDateTime(displayCompletedAt(order)),
       formatExcelDateTime(order.created_at),
-      formatExcelDateTime(order.completed_at),
       order.status === "completed" ? "已完成" : "进行中",
       assignedNames.join(", "),
       roundMoney(safeNumber(order.base_price_snapshot)),
       specialRequirementsText(order),
       roundMoney(safeNumber(order.special_total)),
+      roundMoney(safeNumber(order.original_total_before_discount, order.base_price_snapshot + order.special_total)),
+      order.override_discount ?? "",
+      roundMoney(safeNumber(order.discount_amount)),
       roundMoney(safeNumber(order.total_price, order.order_original_total)),
+      appliedOverrideCommission ?? "",
       tipDetails,
       roundMoney(totalTip),
       transferFeeDetails,
@@ -346,7 +363,9 @@ export function buildClubExportWorkbookData(
         "reassignment_history", "final_club_income",
         "final_worker_incomes", "special_requirements",
         "base_price_snapshot", "special_total", "total_price", "order_original_total",
-        "created_at", "completed_at", "pricing_snapshot", "settled", "settlement_id",
+        "original_total_before_discount", "discount_amount", "override_commission_rate", "override_discount",
+        "custom_order_no", "created_at", "display_created_at", "completed_at", "display_completed_at",
+        "pricing_snapshot", "settled", "settlement_id",
         "settlement_ids_by_worker", "settlement_period_id", "settlement_period_ids_by_worker",
       ]),
     ];
@@ -557,17 +576,17 @@ export function buildClubExportWorkbookData(
       {
         name: "订单记录",
         headers: [
-          "订单ID", "服务ID", "服务名称", "订单类型", "陪玩时长（小时）",
-          "每小时价格快照", "下单时间", "完成时间", "订单状态", "涉及打手",
-          "基础价格快照", "特殊需求明细", "特殊需求总加价", "订单总价", "打赏明细",
+          "订单ID", "订单编号", "服务ID", "服务名称", "订单类型", "陪玩时长（小时）",
+          "每小时价格快照", "展示下单时间", "展示完成时间", "原始创建时间", "订单状态", "涉及打手",
+          "基础价格快照", "特殊需求明细", "特殊需求总加价", "折扣前订单总价", "临时折扣（%）", "折扣金额", "订单总价", "临时抽成（%）", "打赏明细",
           "总打赏", "转单费明细（工资属性）", "转单费合计", "换人记录",
           "各打手订单收入（进周期）", "各打手打赏收入（即时）",
           "各打手最终收入", "俱乐部抽成", "分配模式", "抽成规则快照",
           "分配权重快照", "是否已结算", "所属结算记录ID", "所属结算周期ID", "其他字段",
         ],
         rows: orderRows,
-        currencyColumns: [6, 11, 13, 14, 16, 18, 23],
-        wrapColumns: [10, 12, 15, 17, 19, 20, 21, 22, 25, 26, 28, 29, 30],
+        currencyColumns: [7, 13, 15, 16, 18, 19, 22, 24, 29],
+        wrapColumns: [12, 14, 21, 23, 25, 26, 27, 28, 31, 32, 34, 35, 36],
       },
       {
         name: "结算记录",

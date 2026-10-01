@@ -152,9 +152,14 @@ export function getCommissionRate(
     commission_mode?: CommissionMode;
     club_commission_rate: number;
     tier_commission_rates?: TierCommissionRates;
+    /** 单笔订单临时统一抽成，优先级高于价格表所有抽成配置。 */
+    override_commission_rate?: number | null;
   },
   worker: Pick<Worker, "workerType" | "tier">,
 ) {
+  if (input.override_commission_rate !== undefined && input.override_commission_rate !== null) {
+    return input.override_commission_rate;
+  }
   if ((input.commission_mode ?? "uniform") === "by_tier") {
     if (worker.workerType === "entertainment") {
       return input.tier_commission_rates?.["娱乐陪玩"] ?? 0;

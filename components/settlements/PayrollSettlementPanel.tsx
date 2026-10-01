@@ -63,6 +63,13 @@ import {
 import { fromCents, toCents } from "@/lib/settlement";
 import { workerTipEarningForOrder } from "@/lib/order-earnings";
 import { useClubStore } from "@/store/use-club-store";
+import { TimeRangeSelector } from "@/components/filters/TimeRangeSelector";
+import {
+  ALL_TIME_RANGE,
+  matchesTimeRange,
+  timeRangeLabel,
+  type TimeRangeFilter,
+} from "@/lib/time-range";
 
 const glassCard =
   "rounded-[22px] border border-white/[0.08] bg-[#1c1c1e]/75 shadow-[0_18px_50px_rgba(0,0,0,0.22)] backdrop-blur-md";
@@ -542,10 +549,9 @@ export function PayrollSettlementPanel() {
   const deleteSettlementPeriod = useClubStore((state) => state.deleteSettlementPeriod);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [now, setNow] = useState(() => Date.now());
-  const [tab, setTab] = useState("pending");
+  const [tab, setTab] = useState("all");
   const [workerFilter, setWorkerFilter] = useState("all");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  const [timeRange, setTimeRange] = useState<TimeRangeFilter>(() => ({ ...ALL_TIME_RANGE }));
   const [viewing, setViewing] = useState<SettlementRecord | null>(null);
   const [settling, setSettling] = useState<{ worker: Worker; period: SettlementPeriod } | null>(null);
   const [deleting, setDeleting] = useState<SettlementRecord | null>(null);
@@ -568,17 +574,24 @@ export function PayrollSettlementPanel() {
     () => new Map(periods.filter((period) => period.status === "active").map((period) => [period.id, period])),
     [periods],
   );
+  const filteredRecords = useMemo(
+    () => records
+      .filter((record) => workerFilter === "all" || record.worker_id === workerFilter)
+      .filter((record) => matchesTimeRange(record.period_end, timeRange))
+      .sort((first, second) => second.period_end - first.period_end),
+    [records, timeRange, workerFilter],
+  );
   const overdueIds = useMemo(
     () => new Set(
-      records
+      filteredRecords
         .filter((record) => isSettlementOverdue(record, workersById.get(record.worker_id)?.settlement_config.reminder_hours ?? 72, now))
         .map((record) => record.id),
     ),
-    [now, records, workersById],
+    [filteredRecords, now, workersById],
   );
   const pending = useMemo(
-    () => records.filter((record) => record.status === "pending").sort((a, b) => a.created_at - b.created_at),
-    [records],
+    () => filteredRecords.filter((record) => record.status === "pending"),
+    [filteredRecords],
   );
   const historyWorkers = useMemo(() => {
     const byId = new Map<string, string>();
@@ -588,17 +601,13 @@ export function PayrollSettlementPanel() {
     });
     return [...byId.entries()];
   }, [records, workers]);
-  const paid = useMemo(() => {
-    const start = dateFrom ? Date.parse(`${dateFrom}T00:00:00+08:00`) : null;
-    const end = dateTo ? Date.parse(`${dateTo}T23:59:59.999+08:00`) : null;
-    return records
-      .filter((record) => record.status === "paid")
-      .filter((record) => workerFilter === "all" || record.worker_id === workerFilter)
-      .filter((record) => start === null || record.period_end >= start)
-      .filter((record) => end === null || record.period_end <= end)
-      .sort((a, b) => b.period_end - a.period_end);
-  }, [dateFrom, dateTo, records, workerFilter]);
-  const visibleRecords = tab === "pending" ? pending : paid;
+  const paid = useMemo(
+    () => filteredRecords.filter((record) => record.status === "paid"),
+    [filteredRecords],
+  );
+  const visibleRecords = tab === "pending" ? pending : tab === "history" ? paid : filteredRecords;
+  const pendingTotal = pending.reduce((sum, record) => sum + record.total_amount, 0);
+  const paidTotal = paid.reduce((sum, record) => sum + record.total_amount, 0);
 
   function showOverdue() {
     setTab("pending");
@@ -637,7 +646,7 @@ export function PayrollSettlementPanel() {
           <h2 className="mt-2 text-2xl font-semibold tracking-[-0.035em] text-white sm:text-3xl">工资结算</h2>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-white/42">接单时自动开启工资周期，由管理员选择结束时间并手动结算；订单与经营账务保持不变。</p>
         </div>
-        <Badge className="h-9 border-[#FF9F0A]/20 bg-[#FF9F0A]/12 px-3 text-[#FFB340]">{pending.length ? `有 ${pending.length} 笔工资待发放` : "暂无待发放工资"}</Badge>
+          <Badge className="h-9 border-[#FF9F0A]/20 bg-[#FF9F0A]/12 px-3 text-[#FFB340]">{pending.length ? `有 ${pending.length} 笔工资待发放` : "暂无待发放工资"}</Badge>
       </div>
 
       <AnimatePresence>
@@ -676,23 +685,27 @@ export function PayrollSettlementPanel() {
         </div>
       </section>
 
+      <section className="grid gap-3 sm:grid-cols-3">
+        <div className={`${glassCard} p-4`}><p className="text-xs text-white/38">{timeRangeLabel(timeRange)}待发放总额</p><p className="mt-2 text-xl font-semibold text-[#FFB340]">{formatMoney(pendingTotal)}</p></div>
+        <div className={`${glassCard} p-4`}><p className="text-xs text-white/38">{timeRangeLabel(timeRange)}已发放总额</p><p className="mt-2 text-xl font-semibold text-[#5FE778]">{formatMoney(paidTotal)}</p></div>
+        <div className={`${glassCard} p-4`}><p className="text-xs text-white/38">超期未发放</p><p className="mt-2 text-xl font-semibold text-[#FF6961]">{overdueIds.size} 笔</p></div>
+      </section>
+
       <div ref={overdueAnchor} className="scroll-mt-40 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList className="h-11 rounded-2xl border border-white/[0.07] bg-white/[0.035] p-1">
+            <TabsTrigger value="all" className="rounded-xl px-4 text-white/48 data-[state=active]:bg-white/[0.09] data-[state=active]:text-white">全部记录 <span className="ml-1 text-[#64D2FF]">{filteredRecords.length}</span></TabsTrigger>
             <TabsTrigger value="pending" className="rounded-xl px-4 text-white/48 data-[state=active]:bg-white/[0.09] data-[state=active]:text-white">待发放 <span className="ml-1 text-[#FFB340]">{pending.length}</span></TabsTrigger>
             <TabsTrigger value="history" className="rounded-xl px-4 text-white/48 data-[state=active]:bg-white/[0.09] data-[state=active]:text-white">历史结算</TabsTrigger>
           </TabsList>
         </Tabs>
-        {tab === "history" ? (
-          <motion.div initial={{ opacity: 0, y: -5 }} animate={{ opacity: 1, y: 0 }} className="grid gap-2 sm:grid-cols-3">
-            <Select value={workerFilter} onValueChange={setWorkerFilter}>
-              <SelectTrigger className={`${inputClass} min-w-40`}><SelectValue /></SelectTrigger>
-              <SelectContent className="border-white/10 bg-[#242426] text-white"><SelectItem value="all">全部打手</SelectItem>{historyWorkers.map(([workerId, workerName]) => <SelectItem key={workerId} value={workerId}>{workerName}</SelectItem>)}</SelectContent>
-            </Select>
-            <Input aria-label="开始日期" type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} className={inputClass} />
-            <Input aria-label="结束日期" type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} className={inputClass} />
-          </motion.div>
-        ) : null}
+        <motion.div initial={{ opacity: 0, y: -5 }} animate={{ opacity: 1, y: 0 }} className="flex flex-wrap gap-2">
+          <Select value={workerFilter} onValueChange={setWorkerFilter}>
+            <SelectTrigger className={`${inputClass} min-w-40`}><SelectValue /></SelectTrigger>
+            <SelectContent className="border-white/10 bg-[#242426] text-white"><SelectItem value="all">全部打手</SelectItem>{historyWorkers.map(([workerId, workerName]) => <SelectItem key={workerId} value={workerId}>{workerName}</SelectItem>)}</SelectContent>
+          </Select>
+          <TimeRangeSelector value={timeRange} onChange={setTimeRange} />
+        </motion.div>
       </div>
 
       <AnimatePresence mode="wait" initial={false}>
@@ -700,7 +713,7 @@ export function PayrollSettlementPanel() {
           <AnimatePresence initial={false} mode="popLayout">
             {visibleRecords.map((record) => <SettlementCard key={record.id} record={record} orders={orders} overdue={overdueIds.has(record.id)} now={now} onView={setViewing} onDelete={setDeleting} />)}
           </AnimatePresence>
-          {!visibleRecords.length ? <div className={`${glassCard} grid min-h-64 place-content-center text-center`}><WalletCards className="mx-auto mb-3 size-9 text-white/20" /><p className="text-sm text-white/40">{tab === "pending" ? "当前没有待发放结算" : "筛选范围内没有历史结算"}</p></div> : null}
+          {!visibleRecords.length ? <div className={`${glassCard} grid min-h-64 place-content-center text-center`}><WalletCards className="mx-auto mb-3 size-9 text-white/20" /><p className="text-sm text-white/40">{tab === "pending" ? "当前没有待发放结算" : "筛选范围内没有结算记录"}</p></div> : null}
         </motion.div>
       </AnimatePresence>
 

@@ -72,16 +72,19 @@ export function ReassignOrderModal({
   const oldWeight = order?.pricing_snapshot.payout_weights.find(
     (entry) => entry.workerId === oldWorker?.id,
   );
-  const assignmentRule = order && menuItem && oldWeight
-    ? {
-        commission_mode: order.pricing_snapshot.commission_mode,
-        split_type: order.pricing_snapshot.split_type,
-        eligible_tiers:
-          order.pricing_snapshot.split_type === "tiered" && oldWeight.tier
-            ? [oldWeight.tier]
-            : menuItem.eligible_tiers,
-      }
-    : null;
+  const assignmentRule = useMemo(
+    () => order && menuItem && oldWeight
+      ? {
+          commission_mode: order.pricing_snapshot.commission_mode,
+          split_type: order.pricing_snapshot.split_type,
+          eligible_tiers:
+            order.pricing_snapshot.split_type === "tiered" && oldWeight.tier
+              ? [oldWeight.tier]
+              : menuItem.eligible_tiers,
+        }
+      : null,
+    [menuItem, oldWeight, order],
+  );
 
   const candidates = useMemo(() => {
     if (!order || !assignmentRule) return [];
