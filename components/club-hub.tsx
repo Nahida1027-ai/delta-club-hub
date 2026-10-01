@@ -325,6 +325,12 @@ function Dashboard({
     ),
     [orders, timeRange],
   );
+  const activeInRange = useMemo(
+    () => orders.filter(
+      (order) => order.status === "active" && matchesTimeRange(order.created_at, timeRange),
+    ),
+    [orders, timeRange],
+  );
   const clubIncome = completed.reduce((sum, order) => sum + (order.final_club_income ?? 0), 0);
   const orderWageExpense = completed.reduce(
     (sum, order) => sum + totalEarningsMap(resolveWorkerOrderEarnings(order)),
@@ -373,7 +379,7 @@ function Dashboard({
       income: worker.orderIncome + worker.tipIncome,
     }))
     .sort((a, b) => b.income - a.income);
-  const pieData = workerData.filter((worker) => worker.income > 0);
+  const pieData = workerData.filter((worker) => worker.orders > 0);
 
   return (
     <div className="space-y-8">
@@ -384,12 +390,13 @@ function Dashboard({
         action={<TimeRangeSelector value={timeRange} onChange={onTimeRangeChange} />}
       />
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
         <MetricCard label="俱乐部总抽成" value={clubIncome} icon={CircleDollarSign} note={`${rangeLabel}已完成订单，打赏不参与抽成`} />
+        <MetricCard label="打手总支出" value={workerExpense} icon={WalletCards} tone="violet" note={`订单工资 ${shortMoney(orderWageExpense)} + 即时打赏 ${shortMoney(tipExpense)}`} />
         <MetricCard label="订单工资支出" value={orderWageExpense} icon={WalletCards} tone="violet" note="进入工资结算周期" />
         <MetricCard label="即时打赏支出" value={tipExpense} icon={Sparkles} tone="orange" note="直接到账，不进周期" />
         <MetricCard label="净利润" value={clubIncome} icon={Gauge} tone="green" note="当前未计运营成本" />
-        <MetricCard label="完成订单" value={completed.length} icon={ShieldCheck} tone="orange" money={false} note={`${orders.filter((order) => order.status === "active").length} 单正在进行`} />
+        <MetricCard label="完成订单" value={completed.length} icon={ShieldCheck} tone="orange" money={false} note={`${activeInRange.length} 单正在进行`} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.35fr_0.85fr]">
@@ -421,22 +428,22 @@ function Dashboard({
         </article>
 
         <article className={`${glassCard} min-h-[360px] p-5 sm:p-6`}>
-          <h3 className="text-lg font-semibold text-white">打手收入构成</h3>
-            <p className="mt-1 text-sm text-white/40">按{rangeLabel}已完成订单实付金额</p>
+          <h3 className="text-lg font-semibold text-white">打手接单量占比</h3>
+            <p className="mt-1 text-sm text-white/40">按{rangeLabel}已完成订单数量</p>
           {pieData.length ? (
             <div className="mt-4 grid items-center gap-4 sm:grid-cols-[180px_1fr] xl:grid-cols-1 2xl:grid-cols-[180px_1fr]">
               <div className="relative mx-auto h-[190px] w-[190px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
-                    <Pie data={pieData} dataKey="income" nameKey="name" innerRadius={56} outerRadius={84} paddingAngle={3} stroke="none">
+                    <Pie data={pieData} dataKey="orders" nameKey="name" innerRadius={56} outerRadius={84} paddingAngle={3} stroke="none">
                       {pieData.map((entry, index) => <Cell key={entry.id} fill={chartColors[index % chartColors.length]} />)}
                     </Pie>
-                    <RechartsTooltip contentStyle={{ background: "rgba(28,28,30,.96)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 14, color: "white" }} formatter={(value) => [formatMoney(Number(value)), "收入"]} />
+                    <RechartsTooltip contentStyle={{ background: "rgba(28,28,30,.96)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 14, color: "white" }} formatter={(value) => [`${Number(value)} 单`, "完成订单"]} />
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="pointer-events-none absolute inset-0 grid place-content-center text-center">
-                  <span className="text-xs text-white/35">总支出</span>
-                  <span className="mt-1 text-lg font-semibold text-white">{shortMoney(workerExpense)}</span>
+                  <span className="text-xs text-white/35">总单量</span>
+                  <span className="mt-1 text-lg font-semibold text-white">{completed.length} 单</span>
                 </div>
               </div>
               <div className="space-y-2.5">
@@ -446,7 +453,7 @@ function Dashboard({
                       <i className="size-2 rounded-full" style={{ background: chartColors[index % chartColors.length] }} />
                       <span className="truncate">{entry.name}</span>
                     </span>
-                    <span className="font-medium text-white">{formatMoney(entry.income)}</span>
+                    <span className="font-medium text-white">{entry.orders} 单</span>
                   </div>
                 ))}
               </div>
@@ -1763,6 +1770,7 @@ function HistoryPanel({
   const [deletingOrder, setDeletingOrder] = useState<Order | null>(null);
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
   const completed = orders.filter(
     (order) => order.status === "completed" && matchesTimeRange(order.created_at, timeRange),
   );
@@ -1778,6 +1786,13 @@ function HistoryPanel({
         .includes(needle);
     })
     .sort((first, second) => Date.parse(displayCreatedAt(second)) - Date.parse(displayCreatedAt(first)));
+  const ordersPerPage = 20;
+  const pageCount = Math.max(1, Math.ceil(visibleOrders.length / ordersPerPage));
+  const currentPage = Math.min(page, pageCount);
+  const pagedOrders = visibleOrders.slice(
+    (currentPage - 1) * ordersPerPage,
+    currentPage * ordersPerPage,
+  );
   const rangeLabel = timeRangeLabel(timeRange);
   const clubIncome = completed.reduce((sum, order) => sum + (order.final_club_income ?? 0), 0);
   const orderWageExpense = completed.reduce(
@@ -1800,13 +1815,18 @@ function HistoryPanel({
     }
   }
 
+  function updateTimeRange(next: TimeRangeFilter) {
+    setPage(1);
+    onTimeRangeChange(next);
+  }
+
   return (
     <div className="space-y-8">
       <SectionTitle
         eyebrow="LEDGER"
         title="订单与经营账本"
         detail="列表按可编辑的展示下单时间排序；财务汇总与工资结算仍严格使用订单原始创建时间。"
-        action={<TimeRangeSelector value={timeRange} onChange={onTimeRangeChange} />}
+        action={<TimeRangeSelector value={timeRange} onChange={updateTimeRange} />}
       />
       <div className="grid gap-4 sm:grid-cols-3">
         <MetricCard label="俱乐部入账" value={clubIncome} icon={CircleDollarSign} note={`${rangeLabel} ${completed.length} 张已完成订单`} />
@@ -1822,13 +1842,17 @@ function HistoryPanel({
           <div className="relative w-full sm:w-72">
             <Input
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(1);
+              }}
               placeholder="搜索订单编号、服务或打手"
               className={`${inputClass} h-10`}
             />
           </div>
         </div>
         {visibleOrders.length ? (
+          <>
           <Table>
             <TableHeader>
               <TableRow className="border-white/[0.07] hover:bg-transparent">
@@ -1842,7 +1866,7 @@ function HistoryPanel({
             </TableHeader>
             <TableBody>
               <AnimatePresence initial={false} mode="popLayout">
-                {visibleOrders.map((order) => (
+                {pagedOrders.map((order) => (
                   <OrderHistoryItem
                     key={order.id}
                     order={order}
@@ -1855,6 +1879,33 @@ function HistoryPanel({
               </AnimatePresence>
             </TableBody>
           </Table>
+          {visibleOrders.length > ordersPerPage ? (
+            <div className="flex flex-col gap-3 border-t border-white/[0.07] px-5 py-3.5 text-sm text-white/42 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+              <p>显示 {(currentPage - 1) * ordersPerPage + 1}–{Math.min(currentPage * ordersPerPage, visibleOrders.length)} / 共 {visibleOrders.length} 张订单</p>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={currentPage <= 1}
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  className="h-9 rounded-xl border-white/10 bg-white/[0.04] text-white/65 hover:bg-white/[0.08] hover:text-white"
+                >
+                  上一页
+                </Button>
+                <span className="min-w-16 text-center text-xs text-white/48">{currentPage} / {pageCount}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={currentPage >= pageCount}
+                  onClick={() => setPage((current) => Math.min(pageCount, current + 1))}
+                  className="h-9 rounded-xl border-white/10 bg-white/[0.04] text-white/65 hover:bg-white/[0.08] hover:text-white"
+                >
+                  下一页
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          </>
         ) : (
           <div className="grid min-h-60 place-content-center text-center">
             <History className="mx-auto mb-3 size-8 text-white/25" />
