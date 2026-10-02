@@ -150,6 +150,8 @@ export interface TransferFeeRecord {
 
 export interface Order {
   id: string;
+  /** 仅影响“全部订单”自定义展示顺序；null 时按展示下单时间排序。 */
+  manual_sort_index: number | null;
   /** 用户可读订单编号；旧数据缺失时由展示层按原始时间回退生成。 */
   custom_order_no?: string;
   menu_item_id: string;
@@ -233,6 +235,8 @@ export interface SettlementOrderSnapshot {
 
 export interface SettlementRecord {
   id: string;
+  /** 仅影响“全部结算记录”自定义展示顺序；null 时按周期结束时间排序。 */
+  manual_sort_index: number | null;
   /** 关联本次手动关闭的工资周期；旧记录使用兼容 ID。 */
   period_id: string;
   worker_id: string;

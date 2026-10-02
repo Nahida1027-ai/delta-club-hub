@@ -98,6 +98,7 @@ export const orders = sqliteTable(
       .notNull()
       .default("{}"),
     customOrderNo: text("custom_order_no").notNull().default(""),
+    manualSortIndex: integer("manual_sort_index"),
     createdAt: text("created_at").notNull(),
     displayCreatedAt: text("display_created_at"),
     completedAt: text("completed_at"),
@@ -107,6 +108,7 @@ export const orders = sqliteTable(
     index("idx_orders_status").on(table.status),
     index("idx_orders_completed_at").on(table.completedAt),
     index("idx_orders_display_created_at").on(table.displayCreatedAt),
+    index("idx_orders_manual_sort_index").on(table.manualSortIndex),
   ],
 );
 
@@ -145,6 +147,7 @@ export const settlementRecords = sqliteTable(
     status: text("status").notNull().default("pending"),
     paidAt: integer("paid_at"),
     note: text("note").notNull().default(""),
+    manualSortIndex: integer("manual_sort_index"),
     createdAt: integer("created_at").notNull(),
   },
   (table) => [
@@ -154,6 +157,7 @@ export const settlementRecords = sqliteTable(
       table.workerId,
       table.periodEnd,
     ),
+    index("idx_settlement_records_manual_sort_index").on(table.manualSortIndex),
   ],
 );
 export {};

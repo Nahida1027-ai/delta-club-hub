@@ -3,6 +3,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   AlertTriangle,
   Banknote,
   CalendarClock,
@@ -65,11 +83,23 @@ import { workerTipEarningForOrder } from "@/lib/order-earnings";
 import { useClubStore } from "@/store/use-club-store";
 import { TimeRangeSelector } from "@/components/filters/TimeRangeSelector";
 import {
+  restrictToParentElement,
+  restrictToVerticalAxis,
+  SortableHandle,
+} from "@/components/dnd/SortableList";
+import {
   ALL_TIME_RANGE,
   matchesTimeRange,
   timeRangeLabel,
   type TimeRangeFilter,
 } from "@/lib/time-range";
+import {
+  readListSortMode,
+  saveListSortMode,
+  SETTLEMENT_LIST_SORT_MODE_KEY,
+  sortByManualIndex,
+  type ListSortMode,
+} from "@/lib/manual-list-sort";
 
 const glassCard =
   "rounded-[22px] border border-white/[0.08] bg-[#1c1c1e]/75 shadow-[0_18px_50px_rgba(0,0,0,0.22)] backdrop-blur-md";
@@ -450,6 +480,8 @@ function SettlementCard({
   now,
   onView,
   onDelete,
+  sortableMode = false,
+  sortableDisabled = false,
 }: {
   record: SettlementRecord;
   orders: Order[];
@@ -457,7 +489,25 @@ function SettlementCard({
   now: number;
   onView: (record: SettlementRecord) => void;
   onDelete: (record: SettlementRecord) => void;
+  sortableMode?: boolean;
+  sortableDisabled?: boolean;
 }) {
+  const {
+    active,
+    activeIndex,
+    attributes,
+    index,
+    isOver,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: record.id,
+    disabled: !sortableMode || sortableDisabled,
+  });
   const markSettlementPaid = useClubStore((state) => state.markSettlementPaid);
   const updateSettlementNote = useClubStore((state) => state.updateSettlementNote);
   const isMutating = useClubStore((state) => state.is_mutating);
@@ -468,6 +518,18 @@ function SettlementCard({
     (sum, detail) => sum + (detail.tip_amount ?? 0),
     0,
   );
+  const transformValue = CSS.Transform.toString(transform) ?? "";
+  const dragStyle = {
+    transform: `${transformValue}${isDragging ? " scale(1.02)" : ""}`,
+    transition: transition ?? "transform 200ms ease",
+    opacity: isDragging ? 0.9 : 1,
+    zIndex: isDragging ? 20 : undefined,
+    filter: isDragging ? "drop-shadow(0 20px 32px rgba(0,0,0,.45))" : undefined,
+  };
+  const dragBindings = { attributes, listeners, setActivatorNodeRef };
+  const dropIndicator = sortableMode && isOver && active && active.id !== record.id
+    ? activeIndex < index ? "after" : "before"
+    : null;
 
   async function saveNote() {
     try {
@@ -488,14 +550,8 @@ function SettlementCard({
     }
   }
 
-  return (
-    <motion.article
-      initial={{ opacity: 0, y: -16 }}
-      animate={overdue ? { opacity: 1, y: 0, scale: [1, 1.006, 1] } : { opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, x: -28 }}
-      transition={overdue ? { opacity: { duration: 0.2 }, y: { type: "spring", stiffness: 280, damping: 28 }, scale: { duration: 2.2, repeat: Infinity } } : { type: "spring", stiffness: 280, damping: 28 }}
-      className={`${glassCard} overflow-hidden p-5 sm:p-6 ${overdue ? "border-[#FF5E3A]/55 shadow-[0_20px_60px_rgba(255,59,48,.18)]" : ""}`}
-    >
+  const cardContent = (
+    <>
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2.5">
@@ -511,13 +567,23 @@ function SettlementCard({
           <p className="mt-2 flex items-center gap-2 text-sm text-white/42"><CalendarClock className="size-4 shrink-0" />{formatSettlementDateTime(record.period_start)} ~ {formatSettlementDateTime(record.period_end)}</p>
           {record.paid_at ? <p className="mt-1 text-[12px] text-white/30">发放于 {formatSettlementDateTime(record.paid_at)}</p> : null}
         </div>
-        <div className="shrink-0 lg:text-right">
-          <p className="text-[12px] uppercase tracking-[0.16em] text-white/30">应发工资</p>
-          <p className="mt-1 text-3xl font-semibold tracking-[-0.035em] text-white">{formatMoney(record.total_amount)}</p>
-          <p className="mt-1 text-sm text-white/38">包含 {record.total_orders} 单</p>
-          {tipAmount > 0 ? (
-            <p className="mt-1 text-[12px] text-white/30">另有打赏 {formatMoney(tipAmount)} 已即时结算</p>
+        <div className="flex shrink-0 items-start gap-2 lg:justify-end">
+          {sortableMode ? (
+            <SortableHandle
+              bindings={dragBindings}
+              disabled={isMutating || sortableDisabled}
+              label={`拖动结算记录 ${record.worker_name_snapshot}`}
+              className="size-10 min-h-10 min-w-10 rounded-2xl"
+            />
           ) : null}
+          <div className="lg:text-right">
+            <p className="text-[12px] uppercase tracking-[0.16em] text-white/30">应发工资</p>
+            <p className="mt-1 text-3xl font-semibold tracking-[-0.035em] text-white">{formatMoney(record.total_amount)}</p>
+            <p className="mt-1 text-sm text-white/38">包含 {record.total_orders} 单</p>
+            {tipAmount > 0 ? (
+              <p className="mt-1 text-[12px] text-white/30">另有打赏 {formatMoney(tipAmount)} 已即时结算</p>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -536,6 +602,45 @@ function SettlementCard({
         <Button variant="outline" onClick={() => onView(record)} className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-white/65 hover:bg-white/[0.08] hover:text-white"><Eye className="size-4" />查看订单明细</Button>
         {isPending ? <Button disabled={isMutating} onClick={() => void markPaid()} className="h-11 rounded-xl bg-[#007AFF] text-white shadow-[0_10px_28px_rgba(0,122,255,.25)] hover:bg-[#1685ff]"><CheckCircle2 className="size-4" />{isMutating ? "正在处理…" : "标记已发放"}</Button> : null}
       </div>
+    </>
+  );
+
+  const cardClassName = [
+    `${glassCard} relative overflow-hidden p-5 sm:p-6`,
+    overdue ? "border-[#FF5E3A]/55 shadow-[0_20px_60px_rgba(255,59,48,.18)]" : "",
+    isDragging ? "z-20 bg-[#242426]" : "",
+  ].join(" ");
+  const indicator = dropIndicator ? (
+    <span
+      aria-hidden="true"
+      className={`pointer-events-none absolute inset-x-4 z-30 h-0.5 rounded-full bg-[#007AFF] shadow-[0_0_12px_rgba(0,122,255,.9)] ${dropIndicator === "before" ? "top-0" : "bottom-0"}`}
+    />
+  ) : null;
+
+  if (sortableMode) {
+    return (
+      <article ref={setNodeRef} style={dragStyle} className={cardClassName}>
+        {indicator}
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ type: "spring", stiffness: 280, damping: 28 }}
+        >
+          {cardContent}
+        </motion.div>
+      </article>
+    );
+  }
+
+  return (
+    <motion.article
+      initial={{ opacity: 0, y: -16 }}
+      animate={overdue ? { opacity: 1, y: 0, scale: [1, 1.006, 1] } : { opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, x: -28 }}
+      transition={overdue ? { opacity: { duration: 0.2 }, y: { type: "spring", stiffness: 280, damping: 28 }, scale: { duration: 2.2, repeat: Infinity } } : { type: "spring", stiffness: 280, damping: 28 }}
+      className={cardClassName}
+    >
+      {cardContent}
     </motion.article>
   );
 }
@@ -547,11 +652,16 @@ export function PayrollSettlementPanel() {
   const records = useClubStore((state) => state.settlementRecords);
   const deleteSettlementRecord = useClubStore((state) => state.deleteSettlementRecord);
   const deleteSettlementPeriod = useClubStore((state) => state.deleteSettlementPeriod);
+  const reorderSettlements = useClubStore((state) => state.reorderSettlements);
+  const resetSettlementSort = useClubStore((state) => state.resetSettlementSort);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [now, setNow] = useState(() => Date.now());
   const [tab, setTab] = useState("all");
   const [workerFilter, setWorkerFilter] = useState("all");
   const [timeRange, setTimeRange] = useState<TimeRangeFilter>(() => ({ ...ALL_TIME_RANGE }));
+  const [sortMode, setSortMode] = useState<ListSortMode>(() =>
+    readListSortMode(SETTLEMENT_LIST_SORT_MODE_KEY),
+  );
   const [viewing, setViewing] = useState<SettlementRecord | null>(null);
   const [settling, setSettling] = useState<{ worker: Worker; period: SettlementPeriod } | null>(null);
   const [deleting, setDeleting] = useState<SettlementRecord | null>(null);
@@ -560,11 +670,24 @@ export function PayrollSettlementPanel() {
     period: SettlementPeriod;
   } | null>(null);
   const overdueAnchor = useRef<HTMLDivElement>(null);
+  const settlementSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 240, tolerance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const canCustomizeSettlements =
+    timeRange.preset === "all" && tab === "all" && workerFilter === "all";
+  const manualSettlementMode = canCustomizeSettlements && sortMode === "manual";
+  const canDragSettlements = manualSettlementMode && !isMutating;
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    saveListSortMode(SETTLEMENT_LIST_SORT_MODE_KEY, sortMode);
+  }, [sortMode]);
 
   const workersById = useMemo(
     () => new Map(workers.map((worker) => [worker.id, worker])),
@@ -605,7 +728,13 @@ export function PayrollSettlementPanel() {
     () => filteredRecords.filter((record) => record.status === "paid"),
     [filteredRecords],
   );
-  const visibleRecords = tab === "pending" ? pending : tab === "history" ? paid : filteredRecords;
+  const timeSortedVisibleRecords = tab === "pending" ? pending : tab === "history" ? paid : filteredRecords;
+  const visibleRecords = manualSettlementMode
+    ? sortByManualIndex(
+        filteredRecords,
+        (first, second) => second.period_end - first.period_end,
+      )
+    : timeSortedVisibleRecords;
   const pendingTotal = pending.reduce((sum, record) => sum + record.total_amount, 0);
   const paidTotal = paid.reduce((sum, record) => sum + record.total_amount, 0);
 
@@ -635,6 +764,30 @@ export function PayrollSettlementPanel() {
       setDeletingPeriod(null);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "结算周期删除失败");
+    }
+  }
+
+  async function handleSettlementDragEnd(event: DragEndEvent) {
+    if (!canDragSettlements || !event.over || event.active.id === event.over.id) return;
+    const ids = visibleRecords.map((record) => record.id);
+    const oldIndex = ids.indexOf(String(event.active.id));
+    const newIndex = ids.indexOf(String(event.over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+    try {
+      await reorderSettlements(arrayMove(ids, oldIndex, newIndex));
+      toast.success("结算记录展示顺序已保存");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "结算记录排序保存失败");
+    }
+  }
+
+  async function restoreSettlementTimeSort() {
+    try {
+      await resetSettlementSort();
+      setSortMode("time");
+      toast.success("结算记录已恢复按时间排序");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "恢复默认排序失败");
     }
   }
 
@@ -705,14 +858,90 @@ export function PayrollSettlementPanel() {
             <SelectContent className="border-white/10 bg-[#242426] text-white"><SelectItem value="all">全部打手</SelectItem>{historyWorkers.map(([workerId, workerName]) => <SelectItem key={workerId} value={workerId}>{workerName}</SelectItem>)}</SelectContent>
           </Select>
           <TimeRangeSelector value={timeRange} onChange={setTimeRange} />
+          {canCustomizeSettlements ? (
+            <div className="flex items-center gap-1 rounded-xl border border-white/[0.08] bg-white/[0.035] p-1" aria-label="结算记录排序模式">
+              {(["time", "manual"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  disabled={isMutating}
+                  onClick={() => setSortMode(mode)}
+                  className={`relative h-8 rounded-lg px-3 text-xs transition ${sortMode === mode ? "text-white" : "text-white/42 hover:text-white/70"}`}
+                >
+                  {sortMode === mode ? (
+                    <motion.span
+                      layoutId="settlement-sort-mode-indicator"
+                      className="absolute inset-0 rounded-lg bg-[#007AFF]/22 shadow-[0_6px_18px_rgba(0,122,255,.14)]"
+                      transition={{ type: "spring", stiffness: 340, damping: 28 }}
+                    />
+                  ) : null}
+                  <span className="relative">{mode === "time" ? "按时间排序" : "自定义排序"}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {manualSettlementMode ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isMutating}
+              onClick={() => void restoreSettlementTimeSort()}
+              className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-white/62 hover:bg-white/[0.08] hover:text-white"
+            >
+              <Clock3 className="size-3.5" />恢复默认排序
+            </Button>
+          ) : null}
         </motion.div>
       </div>
 
+      <AnimatePresence initial={false}>
+        {manualSettlementMode ? (
+          <motion.p
+            initial={{ opacity: 0, y: -5 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -5 }}
+            className="-mt-1 text-sm text-white/40"
+          >
+            拖动结算卡片右上角的手柄即可调整展示顺序；工资金额、发放状态和订单归属不会改变。
+          </motion.p>
+        ) : null}
+      </AnimatePresence>
+
       <AnimatePresence mode="wait" initial={false}>
-        <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.2 }} className="space-y-3">
-          <AnimatePresence initial={false} mode="popLayout">
-            {visibleRecords.map((record) => <SettlementCard key={record.id} record={record} orders={orders} overdue={overdueIds.has(record.id)} now={now} onView={setViewing} onDelete={setDeleting} />)}
-          </AnimatePresence>
+        <motion.div key={`${tab}:${manualSettlementMode ? "manual" : "time"}`} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.2 }} className="space-y-3">
+          <DndContext
+            sensors={settlementSensors}
+            collisionDetection={closestCenter}
+            modifiers={[restrictToVerticalAxis, restrictToParentElement]}
+            onDragEnd={(event) => void handleSettlementDragEnd(event)}
+          >
+            <SortableContext
+              items={visibleRecords.map((record) => record.id)}
+              strategy={verticalListSortingStrategy}
+            >
+              {manualSettlementMode ? (
+                <div className="space-y-3">
+                  {visibleRecords.map((record) => (
+                    <SettlementCard
+                      key={record.id}
+                      record={record}
+                      orders={orders}
+                      overdue={overdueIds.has(record.id)}
+                      now={now}
+                      onView={setViewing}
+                      onDelete={setDeleting}
+                      sortableMode
+                      sortableDisabled={!canDragSettlements}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <AnimatePresence initial={false} mode="popLayout">
+                  {visibleRecords.map((record) => <SettlementCard key={record.id} record={record} orders={orders} overdue={overdueIds.has(record.id)} now={now} onView={setViewing} onDelete={setDeleting} />)}
+                </AnimatePresence>
+              )}
+            </SortableContext>
+          </DndContext>
           {!visibleRecords.length ? <div className={`${glassCard} grid min-h-64 place-content-center text-center`}><WalletCards className="mx-auto mb-3 size-9 text-white/20" /><p className="text-sm text-white/40">{tab === "pending" ? "当前没有待发放结算" : "筛选范围内没有结算记录"}</p></div> : null}
         </motion.div>
       </AnimatePresence>

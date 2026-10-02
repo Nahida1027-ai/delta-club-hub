@@ -13,6 +13,7 @@ import {
 import { calculateSettlement } from "../lib/settlement";
 import { isWorkerEligibleForMenuItem } from "../lib/worker-eligibility";
 import { normalizeWorkerGender } from "../lib/worker-profile";
+import { sortByManualIndex } from "../lib/manual-list-sort";
 
 const folders: Folder[] = [
   { id: "root-b", name: "根 B", parentId: null, order: 0, createdAt: 2 },
@@ -39,6 +40,20 @@ assert.deepEqual(
 );
 assert.equal(isDescendant(folders, "root-a", "grandchild"), true, "应识别孙级非法投放目标");
 assert.equal(isDescendant(folders, "grandchild", "root-a"), false, "父级不是子级的子孙");
+
+const manuallySorted = sortByManualIndex(
+  [
+    { id: "new", manual_sort_index: null, created_at: 30 },
+    { id: "second", manual_sort_index: 1, created_at: 10 },
+    { id: "first", manual_sort_index: 0, created_at: 20 },
+  ],
+  (left, right) => right.created_at - left.created_at,
+);
+assert.deepEqual(
+  manuallySorted.map((item) => item.id),
+  ["first", "second", "new"],
+  "手动排序索引应优先，未排序的新记录固定排在末尾",
+);
 
 const cyclicTree = buildFolderTree([
   { id: "cycle-a", name: "A", parentId: "cycle-b", order: 0, createdAt: 1 },

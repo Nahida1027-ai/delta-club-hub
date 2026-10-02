@@ -113,6 +113,13 @@
       "when": 1790866562271,
       "tag": "0015_naive_silver_centurion",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1790938470959,
+      "tag": "0016_ancient_silver_fox",
+      "breakpoints": true
     }
   ]
 }

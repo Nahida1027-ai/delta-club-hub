@@ -54,6 +54,7 @@ assert.throws(() => normalizeSettlementReminderHours(0), /待发放提醒/);
 
 const completedOrder: Order = {
   id: "order-boundary",
+  manual_sort_index: null,
   menu_item_id: "menu-1",
   assigned_worker_ids: ["worker-a", "worker-b"],
   order_type: "escort",
@@ -189,6 +190,7 @@ assert.equal(
 
 const pendingRecord: SettlementRecord = {
   id: "settlement-a",
+  manual_sort_index: null,
   period_id: periodA.id,
   worker_id: worker.id,
   worker_name_snapshot: worker.name,

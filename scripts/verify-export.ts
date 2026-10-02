@@ -61,6 +61,7 @@ const data: ClubData = {
   orders: [
     {
       id: "order-1",
+      manual_sort_index: null,
       menu_item_id: "menu-companion",
       assigned_worker_ids: ["worker-a", "worker-b"],
       order_type: "companion",
@@ -122,6 +123,7 @@ const data: ClubData = {
   settlementRecords: [
     {
       id: "settlement-a",
+      manual_sort_index: null,
       period_id: "period-a",
       worker_id: "worker-a",
       worker_name_snapshot: "甲打手",

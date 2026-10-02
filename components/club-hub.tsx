@@ -2,6 +2,24 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   AnimatePresence,
   motion,
   useMotionValue,
@@ -52,7 +70,12 @@ import { EditServiceModal } from "@/components/Modals/EditServiceModal";
 import { EditOrderPresentationModal } from "@/components/Modals/EditOrderPresentationModal";
 import { OrderConfirmModal } from "@/components/Modals/OrderConfirmModal";
 import { ReassignOrderModal } from "@/components/Modals/ReassignOrderModal";
-import { SortableHandle, SortableList } from "@/components/dnd/SortableList";
+import {
+  restrictToParentElement,
+  restrictToVerticalAxis,
+  SortableHandle,
+  SortableList,
+} from "@/components/dnd/SortableList";
 import { ExportDataButton } from "@/components/exports/ExportDataButton";
 import { TimeRangeSelector } from "@/components/filters/TimeRangeSelector";
 import { ServiceFolderBoard } from "@/components/folders/ServiceFolderBoard";
@@ -141,6 +164,13 @@ import {
   timeRangeLabel,
   type TimeRangeFilter,
 } from "@/lib/time-range";
+import {
+  ORDER_LIST_SORT_MODE_KEY,
+  readListSortMode,
+  saveListSortMode,
+  sortByManualIndex,
+  type ListSortMode,
+} from "@/lib/manual-list-sort";
 
 const glassCard =
   "rounded-[22px] border border-white/[0.08] bg-[#1c1c1e]/75 shadow-[0_18px_50px_rgba(0,0,0,0.22)] backdrop-blur-md";
@@ -1542,13 +1572,33 @@ function OrderHistoryItem({
   isMutating,
   onDelete,
   onEdit,
+  sortableMode = false,
+  sortableDisabled = false,
 }: {
   order: Order;
   workers: Worker[];
   isMutating: boolean;
   onDelete: (order: Order) => void;
   onEdit: (order: Order) => void;
+  sortableMode?: boolean;
+  sortableDisabled?: boolean;
 }) {
+  const {
+    active,
+    activeIndex,
+    attributes,
+    index,
+    isOver,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: order.id,
+    disabled: !sortableMode || sortableDisabled,
+  });
   const [expanded, setExpanded] = useState(false);
   const orderType = normalizeOrderType(order.order_type ?? order.pricing_snapshot.order_type);
   const tipsByWorker = resolveWorkerTipEarnings(order);
@@ -1564,17 +1614,32 @@ function OrderHistoryItem({
     : order.pricing_snapshot.commission_mode === "by_tier"
     ? `档位抽成 1档 ${order.pricing_snapshot.tier_commission_rates["1档"]}% / 2档 ${order.pricing_snapshot.tier_commission_rates["2档"]}% / 3档 ${order.pricing_snapshot.tier_commission_rates["3档"]}% / 娱乐 ${order.pricing_snapshot.tier_commission_rates["娱乐陪玩"] ?? 0}%`
     : `统一抽成 ${order.pricing_snapshot.club_commission_rate}%`;
+  const transformValue = CSS.Transform.toString(transform) ?? "";
+  const dragStyle = {
+    transform: `${transformValue}${isDragging ? " scale(1.02)" : ""}`,
+    transition: transition ?? "transform 200ms ease",
+    opacity: isDragging ? 0.9 : 1,
+    zIndex: isDragging ? 20 : undefined,
+    filter: isDragging ? "drop-shadow(0 18px 28px rgba(0,0,0,.42))" : undefined,
+  };
+  const dropIndicator = sortableMode && isOver && active && active.id !== order.id
+    ? activeIndex < index ? "after" : "before"
+    : null;
+  const dragBindings = { attributes, listeners, setActivatorNodeRef };
 
-  return (
-    <motion.tr
-      layout
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0, x: 72, scale: 0.98 }}
-      transition={{ duration: 0.24, ease: "easeOut" }}
-      className="border-b border-white/[0.06] align-top transition-colors hover:bg-white/[0.025]"
-    >
+  const rowContent = (
+    <>
       <TableCell className="px-5 py-4 sm:px-6">
+        <div className="flex items-start gap-2.5">
+          {sortableMode ? (
+            <SortableHandle
+              bindings={dragBindings}
+              disabled={isMutating || sortableDisabled}
+              label={`拖动订单 ${fallbackOrderNo(order)}`}
+              className="mt-0.5 size-8 min-h-8 min-w-8 rounded-lg p-1.5"
+            />
+          ) : null}
+          <div>
         <p className="font-mono text-[13px] text-white/65">{fallbackOrderNo(order)}</p>
         <p className="mt-1 text-[12px] text-white/32">
           {order.status === "completed" ? "完成 " : "下单 "}
@@ -1583,6 +1648,8 @@ function OrderHistoryItem({
         <Badge className={`mt-2 ${order.status === "completed" ? "border-[#30D158]/20 bg-[#30D158]/10 text-[#5FE778]" : "border-[#FF453A]/20 bg-[#FF453A]/10 text-[#FF9A94]"}`}>
           {order.status === "completed" ? "已完成" : "进行中"}
         </Badge>
+          </div>
+        </div>
       </TableCell>
       <TableCell className="min-w-72 py-4">
         <button
@@ -1750,6 +1817,37 @@ function OrderHistoryItem({
           ) : null}
         </div>
       </TableCell>
+    </>
+  );
+  const rowClassName = [
+    "relative border-b border-white/[0.06] align-top transition-colors hover:bg-white/[0.025]",
+    isDragging ? "bg-white/[0.06]" : "",
+    dropIndicator === "before"
+      ? "before:absolute before:inset-x-2 before:top-0 before:z-30 before:h-0.5 before:rounded-full before:bg-[#007AFF] before:shadow-[0_0_12px_rgba(0,122,255,.9)]"
+      : "",
+    dropIndicator === "after"
+      ? "after:absolute after:inset-x-2 after:bottom-0 after:z-30 after:h-0.5 after:rounded-full after:bg-[#007AFF] after:shadow-[0_0_12px_rgba(0,122,255,.9)]"
+      : "",
+  ].join(" ");
+
+  if (sortableMode) {
+    return (
+      <tr ref={setNodeRef} style={dragStyle} className={rowClassName}>
+        {rowContent}
+      </tr>
+    );
+  }
+
+  return (
+    <motion.tr
+      layout
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 72, scale: 0.98 }}
+      transition={{ duration: 0.24, ease: "easeOut" }}
+      className={rowClassName}
+    >
+      {rowContent}
     </motion.tr>
   );
 }
@@ -1766,15 +1864,33 @@ function HistoryPanel({
   onTimeRangeChange: (value: TimeRangeFilter) => void;
 }) {
   const deleteHistoricalOrder = useClubStore((state) => state.deleteHistoricalOrder);
+  const reorderOrders = useClubStore((state) => state.reorderOrders);
+  const resetOrderSort = useClubStore((state) => state.resetOrderSort);
   const isMutating = useClubStore((state) => state.is_mutating);
   const [deletingOrder, setDeletingOrder] = useState<Order | null>(null);
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [sortMode, setSortMode] = useState<ListSortMode>(() =>
+    readListSortMode(ORDER_LIST_SORT_MODE_KEY),
+  );
+  const orderSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 240, tolerance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const allTime = timeRange.preset === "all";
+  const manualOrderMode = allTime && sortMode === "manual";
+  const canDragOrders = manualOrderMode && !search.trim() && !isMutating;
+
+  useEffect(() => {
+    saveListSortMode(ORDER_LIST_SORT_MODE_KEY, sortMode);
+  }, [sortMode]);
+
   const completed = orders.filter(
     (order) => order.status === "completed" && matchesTimeRange(order.created_at, timeRange),
   );
-  const visibleOrders = orders
+  const timeSortedOrders = orders
     .filter((order) => matchesTimeRange(displayCreatedAt(order), timeRange))
     .filter((order) => {
       const needle = search.trim().toLowerCase();
@@ -1786,6 +1902,12 @@ function HistoryPanel({
         .includes(needle);
     })
     .sort((first, second) => Date.parse(displayCreatedAt(second)) - Date.parse(displayCreatedAt(first)));
+  const visibleOrders = manualOrderMode
+    ? sortByManualIndex(
+        timeSortedOrders,
+        (first, second) => Date.parse(displayCreatedAt(second)) - Date.parse(displayCreatedAt(first)),
+      )
+    : timeSortedOrders;
   const ordersPerPage = 20;
   const pageCount = Math.max(1, Math.ceil(visibleOrders.length / ordersPerPage));
   const currentPage = Math.min(page, pageCount);
@@ -1793,6 +1915,7 @@ function HistoryPanel({
     (currentPage - 1) * ordersPerPage,
     currentPage * ordersPerPage,
   );
+  const renderedOrders = manualOrderMode ? visibleOrders : pagedOrders;
   const rangeLabel = timeRangeLabel(timeRange);
   const clubIncome = completed.reduce((sum, order) => sum + (order.final_club_income ?? 0), 0);
   const orderWageExpense = completed.reduce(
@@ -1820,6 +1943,81 @@ function HistoryPanel({
     onTimeRangeChange(next);
   }
 
+  async function handleOrderDragEnd(event: DragEndEvent) {
+    if (!canDragOrders || !event.over || event.active.id === event.over.id) return;
+    const currentIds = visibleOrders.map((order) => order.id);
+    const oldIndex = currentIds.indexOf(String(event.active.id));
+    const newIndex = currentIds.indexOf(String(event.over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+    try {
+      await reorderOrders(arrayMove(currentIds, oldIndex, newIndex));
+      toast.success("订单展示顺序已保存");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "订单排序保存失败");
+    }
+  }
+
+  async function restoreOrderTimeSort() {
+    try {
+      await resetOrderSort();
+      setSortMode("time");
+      toast.success("订单列表已恢复按时间排序");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "恢复默认排序失败");
+    }
+  }
+
+  const orderTable = (
+    <Table>
+      <TableHeader>
+        <TableRow className="border-white/[0.07] hover:bg-transparent">
+          <TableHead className="h-12 px-5 text-white/40 sm:px-6">订单 / 展示时间</TableHead>
+          <TableHead className="text-white/40">服务与规则</TableHead>
+          <TableHead className="text-white/40">打手实得</TableHead>
+          <TableHead className="text-right text-white/40">打赏</TableHead>
+          <TableHead className="text-right text-white/40">俱乐部入账</TableHead>
+          <TableHead className="pr-5 text-right text-white/40 sm:pr-6">操作</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        <SortableContext
+          items={renderedOrders.map((order) => order.id)}
+          strategy={verticalListSortingStrategy}
+        >
+          {manualOrderMode ? (
+            <>
+            {renderedOrders.map((order) => (
+              <OrderHistoryItem
+                key={order.id}
+                order={order}
+                workers={workers}
+                isMutating={isMutating}
+                onDelete={setDeletingOrder}
+                onEdit={setEditingOrder}
+                sortableMode
+                sortableDisabled={!canDragOrders}
+              />
+            ))}
+            </>
+          ) : (
+            <AnimatePresence initial={false} mode="popLayout">
+              {renderedOrders.map((order) => (
+                <OrderHistoryItem
+                  key={order.id}
+                  order={order}
+                  workers={workers}
+                  isMutating={isMutating}
+                  onDelete={setDeletingOrder}
+                  onEdit={setEditingOrder}
+                />
+              ))}
+            </AnimatePresence>
+          )}
+        </SortableContext>
+      </TableBody>
+    </Table>
+  );
+
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -1837,49 +2035,72 @@ function HistoryPanel({
         <div className="flex flex-col gap-3 border-b border-white/[0.07] px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <div>
             <h3 className="text-lg font-semibold text-white">全部订单</h3>
-            <p className="mt-1 text-sm text-white/40">进行中与已完成订单均可查看；默认按展示下单时间倒序。</p>
+            <p className="mt-1 text-sm text-white/40">
+              {manualOrderMode
+                ? search.trim()
+                  ? "清除搜索后可拖动完整订单列表；当前自定义顺序已保留。"
+                  : "拖动左侧手柄即可调整完整订单列表；财务与结算不会受展示顺序影响。"
+                : "进行中与已完成订单均可查看；默认按展示下单时间倒序。"}
+            </p>
           </div>
-          <div className="relative w-full sm:w-72">
-            <Input
-              value={search}
-              onChange={(event) => {
-                setSearch(event.target.value);
-                setPage(1);
-              }}
-              placeholder="搜索订单编号、服务或打手"
-              className={`${inputClass} h-10`}
-            />
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            {allTime ? (
+              <div className="flex items-center gap-1 rounded-xl border border-white/[0.08] bg-white/[0.035] p-1" aria-label="订单排序模式">
+                {(["time", "manual"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    disabled={isMutating}
+                    onClick={() => setSortMode(mode)}
+                    className={`relative h-8 rounded-lg px-3 text-xs transition ${sortMode === mode ? "text-white" : "text-white/42 hover:text-white/70"}`}
+                  >
+                    {sortMode === mode ? (
+                      <motion.span
+                        layoutId="order-sort-mode-indicator"
+                        className="absolute inset-0 rounded-lg bg-[#007AFF]/22 shadow-[0_6px_18px_rgba(0,122,255,.14)]"
+                        transition={{ type: "spring", stiffness: 340, damping: 28 }}
+                      />
+                    ) : null}
+                    <span className="relative">{mode === "time" ? "按时间排序" : "自定义排序"}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {manualOrderMode ? (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isMutating}
+                onClick={() => void restoreOrderTimeSort()}
+                className="h-10 rounded-xl border-white/10 bg-white/[0.04] text-white/62 hover:bg-white/[0.08] hover:text-white"
+              >
+                <RefreshCw className="size-3.5" />恢复默认排序
+              </Button>
+            ) : null}
+            <div className="relative w-full sm:w-72">
+              <Input
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setPage(1);
+                }}
+                placeholder="搜索订单编号、服务或打手"
+                className={`${inputClass} h-10`}
+              />
+            </div>
           </div>
         </div>
         {visibleOrders.length ? (
           <>
-          <Table>
-            <TableHeader>
-              <TableRow className="border-white/[0.07] hover:bg-transparent">
-                <TableHead className="h-12 px-5 text-white/40 sm:px-6">订单 / 展示时间</TableHead>
-                <TableHead className="text-white/40">服务与规则</TableHead>
-                <TableHead className="text-white/40">打手实得</TableHead>
-                <TableHead className="text-right text-white/40">打赏</TableHead>
-                <TableHead className="text-right text-white/40">俱乐部入账</TableHead>
-                <TableHead className="pr-5 text-right text-white/40 sm:pr-6">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              <AnimatePresence initial={false} mode="popLayout">
-                {pagedOrders.map((order) => (
-                  <OrderHistoryItem
-                    key={order.id}
-                    order={order}
-                    workers={workers}
-                    isMutating={isMutating}
-                    onDelete={setDeletingOrder}
-                    onEdit={setEditingOrder}
-                  />
-                ))}
-              </AnimatePresence>
-            </TableBody>
-          </Table>
-          {visibleOrders.length > ordersPerPage ? (
+          <DndContext
+            sensors={orderSensors}
+            collisionDetection={closestCenter}
+            modifiers={[restrictToVerticalAxis, restrictToParentElement]}
+            onDragEnd={(event) => void handleOrderDragEnd(event)}
+          >
+            {orderTable}
+          </DndContext>
+          {!manualOrderMode && visibleOrders.length > ordersPerPage ? (
             <div className="flex flex-col gap-3 border-t border-white/[0.07] px-5 py-3.5 text-sm text-white/42 sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <p>显示 {(currentPage - 1) * ordersPerPage + 1}–{Math.min(currentPage * ordersPerPage, visibleOrders.length)} / 共 {visibleOrders.length} 张订单</p>
               <div className="flex items-center gap-2">

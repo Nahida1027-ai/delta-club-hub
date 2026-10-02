@@ -108,6 +108,12 @@ interface ClubStore extends ClubData {
   reorderWorkers: (newOrder: string[]) => Promise<void>;
   reorderMenuItems: (newOrder: string[]) => Promise<void>;
   reorderFolders: (parentId: string | null, newOrder: string[]) => Promise<void>;
+  /** 仅更新订单列表的手动展示顺序，不影响财务与结算。 */
+  reorderOrders: (newOrderIds: string[]) => Promise<void>;
+  /** 仅更新结算记录列表的手动展示顺序，不影响已发放状态与金额。 */
+  reorderSettlements: (newOrderIds: string[]) => Promise<void>;
+  resetOrderSort: () => Promise<void>;
+  resetSettlementSort: () => Promise<void>;
   addFolder: (name: string, parentId: string | null) => Promise<Folder>;
   renameFolder: (folderId: string, newName: string) => Promise<void>;
   deleteFolder: (folderId: string) => Promise<void>;
@@ -495,6 +501,98 @@ export const useClubStore = create<ClubStore>((set, get) => ({
         parent_id: normalizedParentId,
         folder_ids: newOrder,
       });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  reorderOrders: async (newOrderIds) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    validateExactOrder(newOrderIds, state.orders.map((order) => order.id), "订单");
+    const indexById = new Map(newOrderIds.map((id, index) => [id, index]));
+    const previous = clubSnapshot(state);
+    set({
+      orders: state.orders.map((order) => ({
+        ...order,
+        manual_sort_index: indexById.get(order.id) ?? order.manual_sort_index ?? null,
+      })),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "reorder_orders", order_ids: newOrderIds });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  reorderSettlements: async (newOrderIds) => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    validateExactOrder(
+      newOrderIds,
+      state.settlementRecords.map((record) => record.id),
+      "结算记录",
+    );
+    const indexById = new Map(newOrderIds.map((id, index) => [id, index]));
+    const previous = clubSnapshot(state);
+    set({
+      settlementRecords: state.settlementRecords.map((record) => ({
+        ...record,
+        manual_sort_index: indexById.get(record.id) ?? record.manual_sort_index ?? null,
+      })),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({
+        action: "reorder_settlements",
+        settlement_ids: newOrderIds,
+      });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  resetOrderSort: async () => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const previous = clubSnapshot(state);
+    set({
+      orders: state.orders.map((order) => ({ ...order, manual_sort_index: null })),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "reset_order_sort" });
+      set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
+    } catch (error) {
+      set({ ...previous, is_mutating: false });
+      throw error;
+    }
+  },
+
+  resetSettlementSort: async () => {
+    if (get().is_mutating) throw new Error("上一项操作仍在处理中");
+    const state = get();
+    const previous = clubSnapshot(state);
+    set({
+      settlementRecords: state.settlementRecords.map((record) => ({
+        ...record,
+        manual_sort_index: null,
+      })),
+      is_mutating: true,
+      error: null,
+    });
+    try {
+      const result = await apiRequest({ action: "reset_settlement_sort" });
       set({ ...result, is_mutating: false, last_synced_at: new Date().toISOString() });
     } catch (error) {
       set({ ...previous, is_mutating: false });
@@ -1186,6 +1284,7 @@ export const useClubStore = create<ClubStore>((set, get) => ({
     );
     const optimisticOrder: Order = {
       id: optimisticId,
+      manual_sort_index: null,
       menu_item_id: menuItemId,
       assigned_worker_ids: workerIds,
       order_type: orderType,

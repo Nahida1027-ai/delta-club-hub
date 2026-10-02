@@ -115,6 +115,7 @@ interface MenuRow {
 
 interface OrderRow {
   id: string;
+  manual_sort_index: number | null;
   menu_item_id: string;
   assigned_worker_ids_json: string;
   order_type: string;
@@ -164,6 +165,7 @@ interface SettlementPeriodRow {
 
 interface SettlementRecordRow {
   id: string;
+  manual_sort_index: number | null;
   period_id: string;
   worker_id: string;
   worker_name_snapshot: string;
@@ -183,11 +185,11 @@ interface SettlementRecordRow {
 const WORKER_SELECT =
   "SELECT id, name, gender, tier, worker_type, sort_order, status, total_completed_orders, total_tip_earnings_cents, joined_at, settlement_interval_days, settlement_reminder_hours, active_period_id FROM workers";
 const ORDER_SELECT =
-  "SELECT id, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, worker_order_earnings_json, worker_tip_earnings_json, transfer_fees_by_worker_json, transfer_fees_json, reassignment_history_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, original_total_before_discount_cents, discount_amount_cents, override_commission_bps, override_discount_bps, pricing_snapshot_json, custom_order_no, created_at, display_created_at, completed_at, display_completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
+  "SELECT id, manual_sort_index, menu_item_id, assigned_worker_ids_json, order_type, hours_half_units, hourly_rate_snapshot_cents, split_type, status, tip_cents, tips_by_worker_json, worker_order_earnings_json, worker_tip_earnings_json, transfer_fees_by_worker_json, transfer_fees_json, reassignment_history_json, final_club_income_cents, final_worker_incomes_json, special_requirements_json, base_price_snapshot_cents, special_total_cents, total_price_cents, order_original_total_cents, original_total_before_discount_cents, discount_amount_cents, override_commission_bps, override_discount_bps, pricing_snapshot_json, custom_order_no, created_at, display_created_at, completed_at, display_completed_at, settled, settlement_id, settlement_ids_by_worker_json, settlement_period_id, settlement_period_ids_by_worker_json FROM orders";
 const SETTLEMENT_PERIOD_SELECT =
   "SELECT id, worker_id, started_at, ended_at, status, settlement_record_id FROM settlement_periods";
 const SETTLEMENT_RECORD_SELECT =
-  "SELECT id, period_id, worker_id, worker_name_snapshot, worker_type_snapshot, period_start, period_end, order_ids_json, order_details_json, total_orders, total_amount_cents, status, paid_at, note, created_at FROM settlement_records";
+  "SELECT id, manual_sort_index, period_id, worker_id, worker_name_snapshot, worker_type_snapshot, period_start, period_end, order_ids_json, order_details_json, total_orders, total_amount_cents, status, paid_at, note, created_at FROM settlement_records";
 
 function normalizeCommissionMode(value: unknown): CommissionMode {
   return value === "by_tier" ? "by_tier" : "uniform";
@@ -250,6 +252,9 @@ function settlementRecordFromRow(row: SettlementRecordRow): SettlementRecord {
   const status: SettlementStatus = row.status === "paid" ? "paid" : "pending";
   return {
     id: row.id,
+    manual_sort_index: Number.isInteger(row.manual_sort_index)
+      ? row.manual_sort_index
+      : null,
     period_id: row.period_id || `legacy:${row.id}`,
     worker_id: row.worker_id,
     worker_name_snapshot: row.worker_name_snapshot,
@@ -533,6 +538,9 @@ function orderFromRow(row: OrderRow): Order {
   const transferFeesByWorker = aggregateTransferFees(transferFees);
   return {
     id: row.id,
+    manual_sort_index: Number.isInteger(row.manual_sort_index)
+      ? row.manual_sort_index
+      : null,
     menu_item_id: row.menu_item_id,
     assigned_worker_ids: assignedWorkerIds,
     order_type: orderType,
@@ -982,6 +990,7 @@ async function settleWorkerPeriodOnServer(
 
   return {
     id: recordId,
+    manual_sort_index: null,
     period_id: period.id,
     worker_id: worker.id,
     worker_name_snapshot: worker.name,
@@ -1492,6 +1501,55 @@ export async function POST(request: Request) {
           db.prepare("UPDATE workers SET sort_order = ? WHERE id = ?").bind(index, id),
         ));
       }
+      return Response.json(await readClubData());
+    }
+
+    // 订单和结算记录的手动排序只保存展示索引，不参与金额、周期或状态计算。
+    if (action === "reorder_orders") {
+      const ids = parseOrderedIds(payload.order_ids, "订单");
+      const existing = await db.prepare("SELECT id FROM orders").all<{ id: string }>();
+      if (
+        ids.length !== existing.results.length ||
+        existing.results.some((order) => !ids.includes(order.id))
+      ) {
+        throw new Error("订单排序数据无效，请刷新后重试");
+      }
+      if (ids.length) {
+        await db.batch(ids.map((id, index) =>
+          db.prepare("UPDATE orders SET manual_sort_index = ? WHERE id = ?")
+            .bind(index, id),
+        ));
+      }
+      return Response.json(await readClubData());
+    }
+
+    if (action === "reset_order_sort") {
+      await db.prepare("UPDATE orders SET manual_sort_index = NULL WHERE manual_sort_index IS NOT NULL").run();
+      return Response.json(await readClubData());
+    }
+
+    if (action === "reorder_settlements") {
+      const ids = parseOrderedIds(payload.settlement_ids, "结算记录");
+      const existing = await db.prepare("SELECT id FROM settlement_records").all<{ id: string }>();
+      if (
+        ids.length !== existing.results.length ||
+        existing.results.some((record) => !ids.includes(record.id))
+      ) {
+        throw new Error("结算记录排序数据无效，请刷新后重试");
+      }
+      if (ids.length) {
+        await db.batch(ids.map((id, index) =>
+          db.prepare("UPDATE settlement_records SET manual_sort_index = ? WHERE id = ?")
+            .bind(index, id),
+        ));
+      }
+      return Response.json(await readClubData());
+    }
+
+    if (action === "reset_settlement_sort") {
+      await db
+        .prepare("UPDATE settlement_records SET manual_sort_index = NULL WHERE manual_sort_index IS NOT NULL")
+        .run();
       return Response.json(await readClubData());
     }
 
