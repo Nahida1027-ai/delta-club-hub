@@ -1,117 +1,163 @@
-# vinext-starter
+# Delta Club Hub
 
-A clean full-stack starter running on [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and Drizzle support.
+> 三角洲俱乐部管理系统——一个为三角洲游戏俱乐部打造的现代化运营管理后台。
 
-## Prerequisites
+Delta Club Hub 面向陪玩、护航和代练俱乐部的日常运营，覆盖打手管理、价格配置、订单派发、工资结算、财务统计与 Excel 数据归档。界面延续 Apple 扁平化与毛玻璃视觉风格，并通过流畅动效和拖拽交互提升高频运营效率。
 
-- Node.js `>=22.13.0`
-- Windows, macOS, or Linux; Git is required only for publishing, and Bash is not required for initialization or the project commands
+在线站点（需要相应访问权限）：[Delta Force Club Hub](https://delta-force-club-hub.zd5m6m5fzy.chatgpt.site)
 
-## Sites Lifecycle
+## 功能特性
 
-The bundled Sites initializer copies this starter into the project and runs its locked dependency install before returning the checkout. Edit the source under `app/`, use `npm run dev` for the Codex local preview, and run the project validation before hosting. The remote Sites builder also runs `npm run build` against the pushed commit. Do not rerun the dependency install unless dependencies are absent or the lockfile changed.
+### 打手管理
 
-This starter does not use `wrangler.jsonc`.
+- 添加、编辑、删除打手，状态在空闲与忙碌之间自动联动。
+- 普通打手支持 1档、2档、3档；娱乐陪玩不设档位。
+- 支持普通打手、娱乐陪玩类型与男女标签。
+- 看板支持筛选和拖拽排序，顺序持久保存。
 
-`install:ci` runs `npm ci` once against this checkout's bundled lockfile, explicitly targeting the project and disabling parent-workspace discovery. It includes dev and optional dependencies required for builds and previews even when production/omit settings would exclude them. It defaults Sharp to prebuilt binaries unless the caller explicitly configures Sharp or a source build. It uses `--prefer-offline --no-audit --no-fund`, reuses the configured npm cache, and leaves network concurrency, retries, timeouts, and lifecycle-script policy to npm's configuration. Retain the installer session until it finishes; do not overlap installers for the same checkout.
+### 价格表管理
 
-`scripts/sites-env.mjs` preserves the caller's HOME, npm cache, proxy, XDG, and temporary-directory configuration while defaulting Wrangler and Miniflare state to the checkout. If npm reports an unwritable cache, select a writable path with `npm_config_cache` for that install. The `dev` and `start` scripts also keep Wrangler logs inside the checkout. Generated `.sites-runtime/` and `.wrangler/` directories are disposable and ignored by Git.
+- 支持固定价格的护航单和按小时计价的陪玩单。
+- 支持统一抽成与按档位抽成，包含娱乐陪玩专属抽成比例。
+- 支持单人全吃、双人平分等分配方式。
+- 支持无限层级嵌套文件夹、跨层级移动与自定义排序。
+- 删除服务前检查进行中订单，历史订单继续使用价格快照。
 
-`npm run dev` uses `vinext dev` for the live Vite preview with HMR, starting at port 5173. Vinext records the running server in ignored `.vinext/` state and rejects another start for the same checkout while that process is alive; reuse its printed URL. It recovers stale state after a stopped process. Pass `--port <port>` or `--hostname <host>` after `npm run dev --` when needed; keep Codex previews on loopback. Like the Sites package, this relies on Vinext's advisory lock; exactly simultaneous starts can race.
+### 接单台
 
-The bundled Sites Vite plugin simulates ChatGPT sign-in only for loopback development requests. Visit `/signin-with-chatgpt?return_to=/` to sign in as `local_seedy` (`seedy@sites.test`, display name `Seedy`) and `/signout-with-chatgpt?return_to=/` to sign out. The development cookie preserves that identity across server restarts. This does not exercise real ChatGPT OAuth and is not included in production builds; hosted authentication remains dispatch-owned.
+- 老板点单并从符合条件的空闲打手中选择接单人员。
+- 支持自定义订单编号、临时抽成和临时折扣。
+- 支持多条特殊需求与实时总价预览。
+- 陪玩单支持 0.5 小时步进的自定义时长计价。
+- 下单时保存价格、抽成、分配规则等完整快照。
 
-The Worker uses `vinext/server/fetch-handler`, including Vinext's config-aware image handling. After building, `npm start` runs that Worker locally through Wrangler on `127.0.0.1`, sharing `.wrangler/state` with dev preview and local D1 migrations; it does not deploy the site or simulate sign-in. Use the URL printed by the server. Pass `npm start -- --port <port>` to select a different built-preview port.
+### 订单管理
 
-Local previews use Miniflare's placeholder `Request.cf` metadata without a network lookup. Set `CLOUDFLARE_CF_FETCH_ENABLED=true` to opt into fetching preview metadata; this setting does not change hosted request metadata.
+- 管理进行中与已完成订单，支持编辑展示时间和订单编号。
+- 支持多次换人，每笔转单费独立记录并进入对应新打手的工资周期。
+- 支持安全删除历史订单，并同步回退关联统计与结算数据。
+- “全部时间”视图支持按时间排序与自定义拖拽排序。
 
-Local tool usage metrics are disabled by default. Set `WRANGLER_SEND_METRICS=true` to opt in.
+### 打赏系统
 
-## Included Shape
+- 订单结束时可分别为每位打手填写打赏金额。
+- 打赏 100% 即时归对应打手，不参与俱乐部抽成。
+- 打赏不进入工资结算周期，与订单工资分开统计。
 
-- edit site code under `app/`
-- `app/chatgpt-auth.ts` provides optional dispatch-owned ChatGPT sign-in helpers
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/index.ts` reads the D1 binding from the Cloudflare Worker environment
-- `db/schema.ts` starts intentionally empty
-- `@cloudflare/workers-types` provides Worker types; `cloudflare-env.d.ts` declares optional `DB`/`BUCKET` bindings—update these declarations if binding names change
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+### 工资结算
 
-## Workspace Auth Headers
+- 打手首次接单时自动创建独立工资结算周期。
+- 管理员手动结束周期、生成结算记录并标记已发放。
+- 支持删除活跃周期和历史结算记录，订单关联关系同步恢复。
+- 支持超期未发放提醒、周期内订单明细与转单费明细。
+- “全部时间”结算记录支持独立的自定义拖拽排序。
 
-Signed-in visitors receive both `oai-authenticated-user-id` and `oai-authenticated-user-email`. Private Sites require every visitor to sign in; public Sites may also have anonymous visitors, for whom neither header is present.
+### 数据统计与导出
 
-The user ID is stable for the same user on the same Site and different across Sites. Use it as the durable user key; use email and name for display or contact purposes.
+- 总览仪表盘、月度收入趋势、每日俱乐部抽成变化。
+- 打手完成单量、订单工资、即时打赏和综合收入排行。
+- 俱乐部收入、订单工资支出、打赏支出等财务汇总。
+- 一键导出打手、价格表、订单、结算、周期、文件夹与汇总统计到多 Sheet Excel 文件。
 
-SIWC-authenticated workspace sites may also receive `oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty `name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by `oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
+### 交互与视觉
 
-Treat the full name as optional and fall back to email when it is absent:
+- Apple 风格的深色扁平化界面与毛玻璃卡片。
+- Framer Motion 弹簧动画、数字变化与列表过渡。
+- `@dnd-kit` 提供鼠标、触摸与键盘可访问的拖拽排序。
+- 响应式布局适配桌面、平板和移动端。
 
-```tsx
-import { headers } from "next/headers";
+## 技术栈
 
-export default async function Home() {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get("oai-authenticated-user-id");
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
+| 分类 | 技术 |
+| --- | --- |
+| 前端框架 | Next.js 16、React 19、TypeScript |
+| 构建与运行 | Vinext、Vite、Cloudflare Workers |
+| 样式 | Tailwind CSS 4 |
+| 状态管理 | Zustand 5 |
+| 表单与校验 | React Hook Form、Zod |
+| 动效 | Framer Motion |
+| 拖拽 | `@dnd-kit/core`、`@dnd-kit/sortable` |
+| 图表 | Recharts |
+| Excel 导出 | ExcelJS |
+| 数据库 | Cloudflare D1、Drizzle ORM |
+| 本机偏好 | localStorage（排序模式、展开状态等） |
 
-  const displayName = fullName ?? email;
-  // ...
-}
+## 项目结构
+
+本项目保留 Next.js App Router 的实际目录结构，没有为了形式改造成 `src/`，避免破坏现有导入路径和部署配置。
+
+```text
+delta-club-hub/
+├── app/                    # 页面入口与服务端 API
+├── components/             # 业务组件、弹窗、看板和 UI 组件
+├── store/                  # Zustand 状态管理
+├── lib/                    # 类型、财务、结算、导出与排序工具
+├── utils/                  # 通用工具函数
+├── db/                     # Drizzle 数据库定义与访问
+├── drizzle/                # Cloudflare D1 数据库迁移
+├── hooks/                  # React Hooks
+├── public/                 # 静态资源
+├── scripts/                # 构建与业务回归验证脚本
+├── video/                  # 项目演示视频源码与素材（可选）
+├── .openai/hosting.json    # Sites 部署配置
+├── package.json
+├── README.md
+├── CHANGELOG.md
+└── LICENSE
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+## 快速开始
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs optional or required ChatGPT sign-in:
+### 环境要求
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use the returned `userId` as the stable user key for user-owned records; do not use email as a durable identifier.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send anonymous visitors through Sign in with ChatGPT.
-- In a Server Component, start sign-in with `<a href={chatGPTSignInPath(returnTo)} target="_top">`. The auth helper module is server-only; do not import it into a Client Component.
-- Do not use `fetch`, XHR, a client-side router, or a framework link that can prefetch the sign-in route. SIWC must start as a top-level navigation.
-- Never request the AuthAPI authorization endpoint directly. The dispatch-owned `/signin-with-chatgpt` route must start the SIWC flow.
-- Use `chatGPTSignOutPath(returnTo)` for browser sign-out links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because they depend on per-request identity headers.
+- Node.js `>= 22.13.0`
+- npm
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the OAuth cookies, and identity header injection. Do not implement app routes for those reserved paths. Routes that do not import and call the helper remain anonymous-compatible.
+```bash
+# 克隆仓库
+git clone https://github.com/Nahida1027-ai/delta-club-hub.git
+cd delta-club-hub
 
-SIWC establishes identity only; it does not prove workspace membership. Use the Sites hosting platform's access policy controls for workspace-wide restrictions, or enforce explicit server-side membership or allowlist checks.
+# 安装依赖
+npm install
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write actions tied to the current ChatGPT user. Leave public content anonymous.
+# 启动开发服务器
+npm run dev
 
-## Local D1 migrations
-
-For a D1-backed local preview, generate SQL with `npm run db:generate`. Build once through the Sites skill's build entrypoint (or `npm run build` for standalone use) to generate `dist/server/wrangler.json`, rebuilding if bindings change. From the project root, apply each pending migration in order:
-
-```sh
-node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_example.sql
+# 构建生产版本
+npm run build
 ```
 
-Replace the filename with the pending migration and `DB` with your D1 binding name if different. Use `.wrangler/state`, not `.wrangler/state/v3`; Wrangler adds the versioned directories. Do not replay migrations already applied locally. This updates only the preview database; publishing applies production migrations separately.
+开发服务器默认使用 `5173` 端口。生产构建完成后，可使用 `npm start` 在本地预览 Worker 与 D1 环境。
 
-## Diagnostic Commands
+## 验证命令
 
-- `npm run install:ci`: perform the one locked dependency install
-- `npm run dev`: start the Vite/Vinext development server
-- `npm run build`: build the deployable Sites artifact
-- `npm run start`: preview the built Worker locally with D1/R2 support
-- `npm run db:generate`: generate Drizzle migrations after schema changes
+```bash
+npm run lint
+npm run verify:settlement
+npm run verify:management
+npm run verify:payroll
+npm run verify:export
+npm run build
+```
 
-When using the Sites plugin, follow its skill instructions for installation, builds, and publishing. These npm commands remain available for standalone use.
+## 使用说明
 
-Like the Sites package, `npm run build` runs `vinext build` directly; it does not require a host `timeout` command.
+1. 首次使用：添加打手 → 配置价格表与抽成规则 → 在接单台创建订单。
+2. 订单结束：填写每位打手的即时打赏 → 确认结束 → 订单工资进入对应结算周期。
+3. 工资结算：选择打手当前周期 → 手动结算 → 核对后标记已发放。
+4. 数据导出：点击页面右上角“导出所有数据”，下载多 Sheet Excel 文件。
 
-## Learn More
+## 数据与隐私
 
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+- 业务数据保存于部署环境的 Cloudflare D1 数据库。
+- localStorage 仅保存本机 UI 偏好，不作为财务数据来源。
+- `.env`、本地数据库、构建产物、依赖目录和视频输出均已加入 Git 忽略规则。
+
+## 版本历史
+
+当前版本：`v1.17.0`。完整迭代记录见 [CHANGELOG.md](./CHANGELOG.md)。
+
+## 许可证
+
+本项目采用 [MIT License](./LICENSE)。

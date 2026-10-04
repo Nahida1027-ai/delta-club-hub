@@ -1,0 +1,237 @@
+{
+  "provenance": "Fresh local D1 migrations and ensureSeeded() only; no hosted API or production data",
+  "sourceCommit": "462fee4c6435a46a1243ed223423fa06079f25db",
+  "order": {
+    "id": "f0fd7db0-17b2-46e2-840d-f9f6eb0100ff",
+    "menu_item_id": "menu-equal",
+    "assigned_worker_ids": [
+      "worker-muye",
+      "worker-beichen"
+    ],
+    "order_type": "escort",
+    "hours": null,
+    "hourly_rate_snapshot": null,
+    "split_type": "equal",
+    "status": "completed",
+    "tip": 40,
+    "tips_by_worker": {
+      "worker-muye": 20,
+      "worker-beichen": 20
+    },
+    "worker_order_earnings": {
+      "worker-muye": 162,
+      "worker-beichen": 162
+    },
+    "worker_tip_earnings": {
+      "worker-muye": 20,
+      "worker-beichen": 20
+    },
+    "transfer_fees_by_worker": {},
+    "transfer_fees": [],
+    "reassignment_history": [],
+    "final_club_income": 36,
+    "final_worker_incomes": [
+      {
+        "workerId": "worker-muye",
+        "amount": 182
+      },
+      {
+        "workerId": "worker-beichen",
+        "amount": 182
+      }
+    ],
+    "special_requirements": [],
+    "base_price_snapshot": 360,
+    "special_total": 0,
+    "total_price": 360,
+    "order_original_total": 360,
+    "original_total_before_discount": 360,
+    "discount_amount": 0,
+    "override_commission_rate": null,
+    "override_discount": null,
+    "pricing_snapshot": {
+      "service_name": "护航双排",
+      "order_type": "escort",
+      "hourly_rate": 0,
+      "base_price": 360,
+      "commission_mode": "uniform",
+      "club_commission_rate": 10,
+      "tier_commission_rates": {
+        "1档": 0,
+        "2档": 0,
+        "3档": 0,
+        "娱乐陪玩": 0
+      },
+      "override_commission_rate": null,
+      "split_type": "equal",
+      "tiered_ratios": null,
+      "payout_weights": [
+        {
+          "workerId": "worker-muye",
+          "workerName": "牧野",
+          "workerType": "standard",
+          "tier": "2档",
+          "weight": 50
+        },
+        {
+          "workerId": "worker-beichen",
+          "workerName": "北辰",
+          "workerType": "standard",
+          "tier": "2档",
+          "weight": 50
+        }
+      ]
+    },
+    "custom_order_no": "DF-DEMO-0001",
+    "created_at": "2026-10-02T04:15:32.655Z",
+    "display_created_at": "2026-10-02T04:15:32.655Z",
+    "completed_at": "2026-10-02T04:15:45.602Z",
+    "display_completed_at": "2026-10-02T04:15:45.602Z",
+    "settled": false,
+    "settlement_id": null,
+    "settlement_ids_by_worker": {},
+    "settlement_period_id": "575bab52-6408-4996-9b4e-b0838767bdb2",
+    "settlement_period_ids_by_worker": {
+      "worker-muye": "575bab52-6408-4996-9b4e-b0838767bdb2",
+      "worker-beichen": "9fb9ed49-c5f8-4107-a6e1-4eb66c3bb901"
+    }
+  },
+  "workers": [
+    {
+      "id": "worker-muye",
+      "name": "牧野",
+      "gender": "male",
+      "tier": "2档",
+      "workerType": "standard",
+      "order": 1,
+      "status": "idle",
+      "total_completed_orders": 3,
+      "total_tip_earnings": 60,
+      "joined_at": 0,
+      "settlement_config": {
+        "interval_days": 3,
+        "reminder_hours": 72
+      },
+      "active_period_id": "6f56e3d7-f3b8-4999-96e4-692c1e2a81a3"
+    },
+    {
+      "id": "worker-beichen",
+      "name": "北辰",
+      "gender": "male",
+      "tier": "2档",
+      "workerType": "standard",
+      "order": 3,
+      "status": "idle",
+      "total_completed_orders": 2,
+      "total_tip_earnings": 40,
+      "joined_at": 0,
+      "settlement_config": {
+        "interval_days": 3,
+        "reminder_hours": 72
+      },
+      "active_period_id": "9fb9ed49-c5f8-4107-a6e1-4eb66c3bb901"
+    }
+  ],
+  "menuItem": {
+    "id": "menu-equal",
+    "service_name": "护航双排",
+    "folderId": null,
+    "order": 1,
+    "order_type": "escort",
+    "base_price": 360,
+    "hourly_rate": 0,
+    "commission_mode": "uniform",
+    "club_commission_rate": 10,
+    "tier_commission_rates": {
+      "1档": 0,
+      "2档": 0,
+      "3档": 0,
+      "娱乐陪玩": 0
+    },
+    "split_type": "equal",
+    "tiered_ratios": null,
+    "eligible_tiers": [
+      "1档",
+      "2档",
+      "3档"
+    ]
+  },
+  "settlementRecord": {
+    "id": "45f97f35-e0c3-4269-bada-774405a2a0fe",
+    "period_id": "575bab52-6408-4996-9b4e-b0838767bdb2",
+    "worker_id": "worker-muye",
+    "worker_name_snapshot": "牧野",
+    "worker_type_snapshot": "standard",
+    "period_start": 1790914532655,
+    "period_end": 1790914552364,
+    "order_ids": [
+      "f0fd7db0-17b2-46e2-840d-f9f6eb0100ff"
+    ],
+    "order_details": [
+      {
+        "order_id": "f0fd7db0-17b2-46e2-840d-f9f6eb0100ff",
+        "service_name": "护航双排",
+        "completed_at": "2026-10-02T04:15:45.602Z",
+        "worker_amount": 162,
+        "tip_amount": 20
+      }
+    ],
+    "total_orders": 1,
+    "total_amount": 162,
+    "status": "pending",
+    "paid_at": null,
+    "note": "",
+    "created_at": 1790914552376
+  },
+  "dashboard": {
+    "completedOrders": 4,
+    "clubIncome": 232,
+    "wageExpense": 1188,
+    "instantTips": 130,
+    "dailyClubIncome": [
+      [
+        "2026-10-02",
+        96
+      ],
+      [
+        "2026-10-04",
+        36
+      ],
+      [
+        "2026-10-07",
+        100
+      ]
+    ],
+    "workerOrderCounts": [
+      {
+        "id": "worker-hanxing",
+        "name": "寒星",
+        "count": 2
+      },
+      {
+        "id": "worker-muye",
+        "name": "牧野",
+        "count": 3
+      },
+      {
+        "id": "worker-beichen",
+        "name": "北辰",
+        "count": 2
+      }
+    ]
+  },
+  "captures": [
+    "01-overview-before.jpg",
+    "02-pricing.jpg",
+    "03-order-desk.jpg",
+    "04-order-confirm.jpg",
+    "05-workforce-active.jpg",
+    "06-order-active.jpg",
+    "07-workforce-before-finish.jpg",
+    "08-finish-modal.jpg",
+    "09-order-completed.jpg",
+    "10-payroll-active.jpg",
+    "11-payroll-closed.jpg",
+    "12-overview-after.jpg"
+  ]
+}

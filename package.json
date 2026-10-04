@@ -1,7 +1,18 @@
 {
   "name": "delta-force-club-hub",
-  "version": "0.1.0",
+  "version": "1.17.0",
+  "description": "Delta Force Club Hub - 三角洲俱乐部运营管理系统",
+  "author": "Delta Club Hub Contributors",
+  "license": "MIT",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nahida1027-ai/delta-club-hub.git"
+  },
+  "homepage": "https://github.com/Nahida1027-ai/delta-club-hub#readme",
+  "bugs": {
+    "url": "https://github.com/Nahida1027-ai/delta-club-hub/issues"
+  },
   "engines": {
     "node": ">=22.13.0"
   },
@@ -15,7 +26,8 @@
     "verify:settlement": "node --import tsx scripts/verify-settlement.ts",
     "verify:management": "node --import tsx scripts/verify-management.ts",
     "verify:payroll": "node --import tsx scripts/verify-payroll.ts",
-    "verify:export": "node --import tsx scripts/verify-export.ts"
+    "verify:export": "node --import tsx scripts/verify-export.ts",
+    "video:render": "npm --prefix video run render"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

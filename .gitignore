@@ -13,10 +13,15 @@
 # testing
 /coverage
 
+# editor settings
+.vscode/
+.idea/
+
 # next.js
 /.next/
 /.vinext/
 /out/
+/build/
 
 # misc
 .DS_Store
@@ -27,9 +32,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.log
 
-# env files (can opt-in for committing if needed)
-.env*
+# environment files
+.env
+.env.local
+.env.*
+!.env.example
 
 # vercel
 .vercel
@@ -44,3 +53,8 @@ next-env.d.ts
 /.codex/
 /outputs/
 /work/
+/video/node_modules/
+/video/output/
+/video/.local-state/
+/video/.tmp/
+/video/public/audio/
